@@ -23,4 +23,19 @@ fi
 
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/bin/imsforge" 0 0 0755
+
+# Record the carriers now, while the phone is running and the SIMs are visible. The first boot
+# after an install runs before the modem is up, and telephony's own config cache — the only other
+# thing that remembers carriers across a reboot — may not have an entry for every SIM yet. Without
+# this the first boot can silently leave a SIM unpatched.
+mkdir -p /data/adb/imsforge
+if "$MODPATH/bin/imsforge" detect --save > /dev/null 2>&1; then
+    ui_print "- Carriers detected:"
+    while IFS="$(printf '\t')" read -r name spn; do
+        [ -n "$name" ] && ui_print "    ${spn:-$name} ($name)"
+    done < /data/adb/imsforge/sims
+else
+    ui_print "! Could not read the SIMs now; the first boot may need a second reboot."
+fi
+
 ui_print "- Installed. Reboot to apply."
