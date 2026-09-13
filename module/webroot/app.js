@@ -80,26 +80,44 @@ function markDirty() {
 
 /* ------------------------------------------------------------------- load */
 
+// One shell invocation instead of ten: each trip across the bridge costs about 60 ms of pure
+// overhead, which dwarfed most of the commands themselves.
+const PROBE = `
+echo "@@version"; grep '^version=' ${MODDIR}/module.prop | cut -d= -f2
+echo "@@config"; cat ${CONFIG} 2>/dev/null
+echo "@@detect"; ${MODDIR}/bin/imsforge detect 2>/dev/null
+echo "@@log"; cat ${MODDIR}/last-boot.log 2>/dev/null
+echo "@@meta"; ls -d /data/adb/metamodule 2>/dev/null || echo missing
+echo "@@impl"; [ -d /data/adb/ksu ] && echo ksu || echo other
+echo "@@md5"; md5sum /product/etc/CarrierSettings/others.pb ${MODDIR}/product/etc/CarrierSettings/others.pb 2>/dev/null | awk '{print $1}'
+echo "@@volte"; dumpsys carrier_config 2>/dev/null | grep -E '^[[:space:]]*carrier_volte_available_bool =' | sort -u
+echo "@@ims"; logcat -b radio -d -t 1000 2>/dev/null | grep isImsRegistered | tail -10
+`;
+
+function sections(stdout) {
+  const out = {};
+  let key = null;
+  for (const line of stdout.split('\n')) {
+    if (line.startsWith('@@')) {
+      key = line.slice(2).trim();
+      out[key] = [];
+    } else if (key) {
+      out[key].push(line);
+    }
+  }
+  for (const k of Object.keys(out)) out[k] = out[k].join('\n').trim();
+  return out;
+}
+
 async function loadAll() {
-  const [cfgRes, detectRes, logRes, verRes, metaRes, implRes, md5Res, ccRes, regRes, radioRes] =
-    await Promise.all([
-      exec(`cat ${CONFIG} 2>/dev/null`),
-      exec(`${MODDIR}/bin/imsforge detect 2>/dev/null`),
-      exec(`cat ${MODDIR}/last-boot.log 2>/dev/null`),
-      exec(`grep '^version=' ${MODDIR}/module.prop | cut -d= -f2`),
-      exec('ls -d /data/adb/metamodule 2>/dev/null || echo missing'),
-      exec('[ -d /data/adb/ksu ] && echo ksu || echo other'),
-      exec(`md5sum /product/etc/CarrierSettings/others.pb ${MODDIR}/product/etc/CarrierSettings/others.pb 2>/dev/null | awk '{print $1}' | tr '\n' ' '`),
-      exec("dumpsys carrier_config 2>/dev/null | grep -E '^[[:space:]]*carrier_volte_available_bool =' | sort -u"),
-      exec('dumpsys telephony.registry 2>/dev/null'),
-      exec('logcat -b radio -d -t 3000 2>/dev/null | grep isImsRegistered | tail -20'),
-    ]);
+  const res = await exec(PROBE);
+  const s = sections(res.stdout);
 
-  $('version').textContent = verRes.stdout.trim();
+  $('version').textContent = (s.version || '').trim();
 
-  if (cfgRes.stdout.trim()) {
+  if (s.config) {
     try {
-      const parsed = JSON.parse(cfgRes.stdout);
+      const parsed = JSON.parse(s.config);
       state.config = {
         auto: parsed.auto !== false,
         carriers: Array.isArray(parsed.carriers) ? parsed.carriers : [],
@@ -108,17 +126,19 @@ async function loadAll() {
     } catch (e) {
       toast('carriers.json is not valid JSON');
     }
+  } else {
+    state.config = { auto: true, carriers: [], skip: [] };
   }
 
   try {
-    state.sims = JSON.parse(detectRes.stdout || '{}').sims || [];
+    state.sims = JSON.parse(s.detect || '{}').sims || [];
   } catch (e) {
     state.sims = [];
   }
 
   // Which carriers did the last boot actually write? Log lines look like
   // "others.pb [25001]: 20 keys" or "tinkoff_ru.pb: 19 keys".
-  const log = logRes.stdout.trim();
+  const log = s.log || '';
   state.patchedLastBoot = [
     ...[...log.matchAll(/\[([^\]]+)\]:\s*\d+ keys/g)].map((m) => m[1]),
     ...[...log.matchAll(/^(\S+)\.pb:\s*\d+ keys/gm)].map((m) => m[1]),
@@ -127,26 +147,42 @@ async function loadAll() {
 
   // isImsRegistered is logged per phone; phone index matches SIM slot order.
   state.ims = {};
-  for (const m of radioRes.stdout.matchAll(/Phone-(\d)\s*: isImsRegistered =(\w+)/g)) {
+  for (const m of (s.ims || '').matchAll(/Phone-(\d)\s*: isImsRegistered =(\w+)/g)) {
     const slot = Number(m[1]);
     state.ims[slot] = state.ims[slot] || { registered: false };
     if (m[2] === 'true') state.ims[slot].registered = true;
   }
-
-  // Two carrier-side states no patch can change. Naming them keeps the module from looking
-  // broken when the carrier simply does not offer the service.
-  const vops = [...regRes.stdout.matchAll(/mVopsSupport = (\d)/g)].map((m) => m[1]);
-  if (vops.includes('3')) {
-    state.reason = 'the network does not offer VoLTE to this SIM';
-  } else if (/IWLAN_IKEV2_AUTH_FAILURE/.test(regRes.stdout)) {
-    state.reason = 'the carrier rejected Wi-Fi calling authentication';
-  } else {
-    state.reason = null;
-  }
+  state.reason = null;
 
   renderSims();
-  renderStatus(metaRes, implRes, md5Res, ccRes);
-  $('raw').value = JSON.stringify(state.config, null, 2);
+  renderStatus(s);
+
+  // The carrier-side reason costs a 200 KB dump of telephony.registry, so it is only worth
+  // fetching when something is actually wrong.
+  if (needsReason()) loadReason();
+}
+
+function needsReason() {
+  return state.sims.some((sim, slot) => {
+    const plan = carrierPlan(sim.canonical_name);
+    return plan.on && !(state.ims[slot] && state.ims[slot].registered);
+  });
+}
+
+async function loadReason() {
+  const res = await exec(
+    "dumpsys telephony.registry 2>/dev/null | " +
+      "grep -oE 'mVopsSupport = [0-9]|IWLAN_IKEV2_AUTH_FAILURE' | sort -u"
+  );
+  // Two carrier-side states no patch can change. Naming them keeps the module from looking
+  // broken when the carrier simply does not offer the service.
+  const vops = [...res.stdout.matchAll(/mVopsSupport = (\d)/g)].map((m) => m[1]);
+  if (vops.includes('3')) {
+    state.reason = 'the network does not offer VoLTE to this SIM';
+  } else if (/IWLAN_IKEV2_AUTH_FAILURE/.test(res.stdout)) {
+    state.reason = 'the carrier rejected Wi-Fi calling authentication';
+  }
+  if (state.reason) renderSims();
 }
 
 /* ----------------------------------------------------------------- render */
@@ -229,22 +265,22 @@ function renderSims() {
   });
 }
 
-function renderStatus(metaRes, implRes, md5Res, ccRes) {
+function renderStatus(s) {
   const rows = $('status-rows');
   rows.replaceChildren();
 
-  const hasMeta = !metaRes.stdout.includes('missing');
-  const isKsu = implRes.stdout.trim() === 'ksu';
+  const hasMeta = !(s.meta || '').includes('missing');
+  const isKsu = (s.impl || '').trim() === 'ksu';
   const pill = (cls, text) => el('span', `pill ${cls}`, text);
 
   addRow(rows, 'Mount backend',
     hasMeta ? pill('ok', 'present') : (isKsu ? pill('bad', 'missing') : pill('idle', 'built in')));
 
-  const hashes = md5Res.stdout.trim().split(/\s+/);
+  const hashes = (s.md5 || '').trim().split(/\s+/);
   const applied = hashes.length === 2 && hashes[0] === hashes[1];
   addRow(rows, 'Patch active on this boot', applied ? pill('ok', 'yes') : pill('bad', 'no'));
 
-  const volte = /carrier_volte_available_bool = true/.test(ccRes.stdout);
+  const volte = /carrier_volte_available_bool = true/.test(s.volte || '');
   addRow(rows, 'Telephony sees VoLTE enabled', volte ? pill('ok', 'yes') : pill('bad', 'no'));
 
   if (!hasMeta && isKsu) {
