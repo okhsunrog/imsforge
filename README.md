@@ -161,6 +161,9 @@ build.sh          cross-compiles and packs dist/imsforge.zip
 - Only useful where Google's CarrierSettings is what supplies carrier config — Pixels and
   devices that ship the same app.
 - `vonr_enabled_bool` does something only where the carrier actually runs 5G SA.
+- The APN label in Settings can lag. Telephony syncs APN rows by the config version, which
+  imsforge derives from Google's, so changing an override that only affects the label leaves the
+  old row in place until the stock version itself moves.
 - MVNOs are matched by MCCMNC and SPN. Those distinguished only by IMSI prefix or GID1 fall back
   to the generic entry; add an explicit override if that is wrong for you.
 - Verified on a Pixel 8 Pro (husky), Android 17, KernelSU Next with NoMount. Magisk is
