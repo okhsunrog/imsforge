@@ -6,9 +6,12 @@ license = "MIT"
 description = "On-device CarrierSettings patcher for imsforge"
 
 [dependencies]
-# rust-protobuf keeps fields that are not in our schema and writes them back out.
-# That matters: Google may add fields to CarrierSettings at any time, and a library
-# that drops unknown fields (prost, quick-protobuf) would silently discard them.
+# Without clap's default features there is no colour and no typo suggestions, which together
+# pull in a surprising amount for a tool whose arguments are a handful of paths.
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+# rust-protobuf keeps fields that are not in our schema and writes them back out. That matters:
+# Google may add fields to CarrierSettings at any time, and a library that drops unknown fields
+# (prost, quick-protobuf) would silently discard them.
 protobuf = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

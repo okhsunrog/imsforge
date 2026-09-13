@@ -140,16 +140,26 @@ pub fn canonical_from_version(value: &str) -> Option<&str> {
     (!canonical.is_empty()).then_some(canonical)
 }
 
-/// Canonical names saved by service.sh once telephony was up.
-pub fn from_saved(path: &Path) -> Vec<String> {
+/// Carriers saved by service.sh once telephony was up, as "<canonical>\t<operator name>".
+///
+/// The operator name has to travel with them: at boot the modem is down, so it cannot be looked
+/// up again, and without it the IMS APN would fall back to being labelled after the canonical
+/// name — "25001 IMS" instead of "МТС IMS".
+pub fn from_saved(path: &Path) -> Vec<(String, String)> {
     std::fs::read_to_string(path)
-        .map(|t| {
-            t.lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        })
+        .map(|t| t.lines().filter_map(parse_saved_line).collect())
         .unwrap_or_default()
+}
+
+fn parse_saved_line(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    Some(match line.split_once('\t') {
+        Some((name, spn)) => (name.to_string(), spn.trim().to_string()),
+        None => (line.to_string(), String::new()),
+    })
 }
 
 pub fn load_carrier_list(dir: &Path) -> Result<CarrierList, String> {
@@ -201,6 +211,20 @@ mod tests {
         assert_eq!(sims.len(), 1);
         assert_eq!(sims[0].mccmnc, "25001");
         assert_eq!(sims[0].spn, "");
+    }
+
+    #[test]
+    fn saved_lines_carry_the_operator_name() {
+        assert_eq!(
+            parse_saved_line("25001\tМТС"),
+            Some(("25001".into(), "МТС".into()))
+        );
+        // Written by an older version, before the name travelled with it.
+        assert_eq!(
+            parse_saved_line("tinkoff_ru"),
+            Some(("tinkoff_ru".into(), String::new()))
+        );
+        assert_eq!(parse_saved_line("  "), None);
     }
 
     #[test]
