@@ -1,0 +1,46 @@
+# Carriers to patch.
+#
+# `canonical_name` is how Google identifies a carrier inside CarrierSettings. Find yours by
+# looking up your MCCMNC in carrier_list.pb — `imsforge carriers` does that for the SIMs
+# currently in the phone and prints ready-to-paste entries.
+#
+# Settings live either in `<canonical_name>.pb` or in a shared `others.pb`; imsforge handles
+# both, you only name the carrier.
+
+[[carrier]]
+canonical_name = "25001"     # MTS Russia — unnamed carrier, canonical name is just the MCCMNC
+ims_apn_name = "MTS IMS"
+
+# Extra non-boolean config keys. carrier_nr_availabilities_int_array: 1 = NSA, 2 = SA,
+# so [1, 2] additionally enables 5G Standalone.
+[carrier.int_arrays]
+carrier_nr_availabilities_int_array = [1, 2]
+
+
+[[carrier]]
+canonical_name = "tinkoff_ru"   # T-Mobile Russia (MVNO on Tele2), ships its own tinkoff_ru.pb
+ims_apn_name = "T-Mobile IMS"
+
+# As of 2026-09 this carrier supports neither VoLTE nor VoWiFi (confirmed by their support).
+# The keys are set anyway so it starts working the day they launch it, with no rebuild.
+
+
+# Per-carrier knobs, all optional:
+#
+#   ims_apn_value = "ims"   APN to create for the IMS PDN. Defaults to "ims", which is what
+#                           nearly every carrier uses. Set it if yours differs, and skip it
+#                           entirely (ims_apn = false) if the carrier already ships an IMS APN.
+#
+#   ims_apn = false         Do not add an IMS APN at all.
+#
+#   vowifi = false          Do not offer VoWiFi. Only worth setting when the carrier has no
+#                           reachable ePDG: with the Settings toggle on, the phone then retries
+#                           an ePDG tunnel every ~20 s forever, which costs real battery.
+#                           Prefer just turning the toggle off in Settings — that is a user
+#                           decision, and this key takes the switch away entirely.
+#
+#   [carrier.bools]         Override or add any boolean carrier config key.
+#   some_key_bool = true
+#
+#   [carrier.int_arrays]    Any int-array carrier config key.
+#   some_key_int_array = [1, 2]

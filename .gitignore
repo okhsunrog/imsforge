@@ -1,0 +1,9 @@
+.generated/
+dist/
+__pycache__/
+.venv/
+
+# Device snapshot: Google's carrier data, tied to one Android build.
+# Recreate it with `imsforge pull`.
+stock/*.pb
+stock/stock.json
