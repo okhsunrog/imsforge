@@ -56,10 +56,9 @@ fn parse_args() -> Args {
     let mut src = PathBuf::from(DEFAULT_SRC);
     let mut out = None;
     let mut cache = None;
-    let mut config = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent()?.parent().map(|d| d.join("carriers.json")))
-        .unwrap_or_else(|| PathBuf::from("carriers.json"));
+    // Config and cache live outside the module directory: a module update replaces that
+    // directory wholesale, which would throw away the user's settings every time.
+    let mut config = PathBuf::from("/data/adb/imsforge/carriers.json");
 
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -249,7 +248,10 @@ fn cmd_patch(args: &Args) -> Result<(), String> {
     let out = args.out.as_ref().ok_or("patch needs --out")?;
     let cfg = Config::load(&args.config)?;
 
-    let cache = args.cache.clone().unwrap_or_else(|| out.join("../../../../stock"));
+    let cache = args
+        .cache
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/data/adb/imsforge/stock"));
     let src = effective_src(&args.src, &cache);
     if src != args.src {
         println!("  /product is already shadowed by us, reading the cached stock instead");

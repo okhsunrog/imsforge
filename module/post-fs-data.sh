@@ -9,6 +9,9 @@
 MODDIR=${0%/*}
 LOG="$MODDIR/last-boot.log"
 PHONE_FILES=/data/user_de/0/com.android.phone/files
+# Settings and the stock cache live outside the module: updating a module replaces its whole
+# directory, which would discard the user's configuration on every upgrade.
+DATADIR=/data/adb/imsforge
 
 # Where the mount backend expects our files. KernelSU keeps partitions at the module root
 # (NoMount and friends scan $MODDIR/product); Magisk and APatch use the system/ prefix.
@@ -22,8 +25,13 @@ fi
     echo "[$(date)] post-fs-data"
     echo "  output: $OUT"
 
-    if "$MODDIR/bin/imsforge" patch --out "$OUT" --config "$MODDIR/carriers.json" \
-        --cache "$MODDIR/stock"; then
+    mkdir -p "$DATADIR"
+    # Migrate a config left in the module directory by an older version.
+    [ -f "$MODDIR/carriers.json" ] && [ ! -f "$DATADIR/carriers.json" ] &&
+        mv "$MODDIR/carriers.json" "$DATADIR/carriers.json" && echo "  migrated carriers.json"
+
+    if "$MODDIR/bin/imsforge" patch --out "$OUT" --config "$DATADIR/carriers.json" \
+        --cache "$DATADIR/stock"; then
         # Files created at runtime inherit adb_data_file from /data/adb. Mounted over /product
         # with that label, com.google.android.carrier cannot read them — so relabel to match a
         # stock file.

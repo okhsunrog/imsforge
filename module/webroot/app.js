@@ -1,7 +1,8 @@
 'use strict';
 
 const MODDIR = '/data/adb/modules/imsforge';
-const CONFIG = `${MODDIR}/carriers.json`;
+const DATADIR = '/data/adb/imsforge';
+const CONFIG = `${DATADIR}/carriers.json`;
 
 let cbId = 0;
 
@@ -150,19 +151,27 @@ async function loadAll() {
 
 /* ----------------------------------------------------------------- render */
 
-/** What imsforge does with this carrier, in plain words. */
+/** What imsforge does with this carrier.
+ *
+ * The switch already shows the state, so the line below it only explains a reason the user did
+ * not choose themselves — whether the config lists the carrier explicitly or detection found it
+ * is an internal detail and stays out of the interface.
+ */
 function carrierPlan(name) {
   if (!name) return { on: false, disabled: true, what: 'Unknown carrier — nothing to patch' };
   if (state.config.skip.includes(name)) {
-    return { on: false, disabled: false, what: 'Left alone, by your choice' };
+    return { on: false, disabled: false, what: 'Not patched' };
   }
-  if (state.config.carriers.some((c) => c.canonical_name === name)) {
-    return { on: true, disabled: false, what: 'Patched — pinned by you' };
+  const on = state.config.carriers.some((c) => c.canonical_name === name)
+    || state.patchedLastBoot.includes(name);
+  if (on) {
+    return {
+      on: true,
+      disabled: false,
+      what: state.patchedLastBoot.includes(name) ? 'Patched' : 'Will be patched on the next boot',
+    };
   }
-  if (state.patchedLastBoot.includes(name)) {
-    return { on: true, disabled: false, what: 'Patched automatically' };
-  }
-  return { on: false, disabled: false, what: 'Not patched — Google already enables VoLTE here' };
+  return { on: false, disabled: false, what: 'Google already enables VoLTE here — no patch needed' };
 }
 
 function renderSims() {
@@ -307,7 +316,9 @@ async function save() {
   // base64 keeps quotes, newlines and non-ASCII intact through the shell.
   const text = JSON.stringify(state.config, null, 2) + '\n';
   const b64 = btoa(unescape(encodeURIComponent(text)));
-  const res = await exec(`echo '${b64}' | base64 -d > ${CONFIG} && chmod 644 ${CONFIG} && echo saved`);
+  const res = await exec(
+    `mkdir -p ${DATADIR} && echo '${b64}' | base64 -d > ${CONFIG} && chmod 644 ${CONFIG} && echo saved`
+  );
   if (res.errno !== 0 || !res.stdout.includes('saved')) {
     toast('Could not write the configuration');
     return;

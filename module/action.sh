@@ -18,4 +18,4 @@ echo
 echo "IMS PDN:"
 dumpsys telephony.registry 2>/dev/null | grep -oE "PcscfAddresses: \[[^]]*\]" | sort -u | sed 's/^/  /'
 echo
-echo "Edit $MODDIR/carriers.json to override anything; changes apply on the next reboot."
+echo "Edit /data/adb/imsforge/carriers.json to override anything; applies on the next reboot."
