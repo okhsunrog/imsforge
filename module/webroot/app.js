@@ -190,7 +190,10 @@ function renderSims() {
     const head = el('div', 'sim-head');
     const titles = el('div');
     titles.append(el('div', 'sim-name', sim.spn || sim.mccmnc));
-    titles.append(el('div', 'sim-meta', `${sim.mccmnc}${name ? ` · ${name}` : ''}`));
+    // Google names an unsupported carrier's entry after its MCCMNC, so the two are often the
+    // same string — printing "25001 · 25001" just looks like a bug.
+    const meta = !name || name === sim.mccmnc ? sim.mccmnc : `${sim.mccmnc} · ${name}`;
+    titles.append(el('div', 'sim-meta', meta));
     head.append(titles);
 
     // One control, one meaning: patch this carrier, or do not.

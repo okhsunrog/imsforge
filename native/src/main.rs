@@ -131,6 +131,11 @@ fn refresh_cache(src: &Path, cache: &Path, names: &[String], output: &[u8]) {
 struct Target {
     carrier: Carrier,
     reason: &'static str,
+    /// Operator name the SIM reports, for logging. CarrierSettings identifies a carrier by a
+    /// canonical name that Google only bothered to make readable for the carriers it supports —
+    /// for the rest the entry is called by its MCCMNC, so a log line of bare "25001" tells the
+    /// reader nothing.
+    label: String,
 }
 
 /// Default the IMS APN label to the carrier name the SIM reports.
@@ -140,6 +145,12 @@ struct Target {
 /// which reads like a glitch.
 fn name_apns(targets: &mut [Target], sims: &[(String, String)]) {
     for t in targets.iter_mut() {
+        if let Some((_, spn)) = sims
+            .iter()
+            .find(|(name, spn)| *name == t.carrier.canonical_name && !spn.is_empty())
+        {
+            t.label = spn.clone();
+        }
         if !t.carrier.ims_apn_name.is_empty() {
             continue;
         }
@@ -175,6 +186,7 @@ fn targets(cfg: &Config, data_src: &Path, list_src: &Path) -> Result<Vec<Target>
         .map(|c| Target {
             carrier: c.clone(),
             reason: "configured",
+            label: String::new(),
         })
         .collect();
 
@@ -221,6 +233,7 @@ fn targets(cfg: &Config, data_src: &Path, list_src: &Path) -> Result<Vec<Target>
         targets.push(Target {
             carrier: Carrier::new(name),
             reason: "detected",
+            label: String::new(),
         });
     }
     name_apns(&mut targets, &resolved);
@@ -264,7 +277,12 @@ fn cmd_patch(args: &Args) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
 
     for t in &targets {
-        println!("  {} ({})", t.carrier.canonical_name, t.reason);
+        let who = if t.label.is_empty() {
+            t.carrier.canonical_name.clone()
+        } else {
+            format!("{} ({})", t.label, t.carrier.canonical_name)
+        };
+        println!("  {who} — {}", t.reason);
     }
     let carriers: Vec<Carrier> = targets.into_iter().map(|t| t.carrier).collect();
 
