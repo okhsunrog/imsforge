@@ -33,7 +33,7 @@ install -m 644 module/webroot/* "$STAGE/webroot/"
 
 ZIP=$DIST/imsforge.zip
 rm -f "$ZIP"
-(cd "$STAGE" && zip -qr "../${ZIP#$DIST/}" .)
+(cd "$STAGE" && zip -qr "../${ZIP#"$DIST"/}" .)
 
 echo "==> $ZIP ($(du -h "$ZIP" | cut -f1))"
 unzip -l "$ZIP" | tail -n +4 | head -n -2

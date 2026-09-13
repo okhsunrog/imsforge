@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      - name: Format
+        working-directory: native
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: native
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        working-directory: native
+        run: cargo test
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Build the module
+        run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" ./build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: imsforge
+          path: dist/imsforge.zip
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The module scripts run under Android's /system/bin/sh, which is toybox — far short of
+      # bash. Checking them as POSIX sh catches the bashisms it would choke on at boot.
+      - name: Shellcheck
+        run: |
+          shellcheck -s sh module/*.sh
+          shellcheck build.sh

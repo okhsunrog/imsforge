@@ -1,4 +1,6 @@
 #!/system/bin/sh
+# Read by the module installer, not by this script.
+# shellcheck disable=SC2034
 SKIPUNZIP=0
 
 ui_print "- imsforge"

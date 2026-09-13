@@ -27,14 +27,16 @@ fn getprop(name: &str) -> String {
 
 /// SIMs currently in the phone. Both props are comma separated, one field per slot.
 pub fn sims() -> Vec<Sim> {
-    let numerics: Vec<&str> = {
-        let s = Box::leak(getprop("gsm.sim.operator.numeric").into_boxed_str());
-        s.split(',').collect()
-    };
-    let names: Vec<&str> = {
-        let s = Box::leak(getprop("gsm.sim.operator.alpha").into_boxed_str());
-        s.split(',').collect()
-    };
+    pair_sims(
+        &getprop("gsm.sim.operator.numeric"),
+        &getprop("gsm.sim.operator.alpha"),
+    )
+}
+
+/// Pair the two SIM properties into slots.
+pub fn pair_sims(numerics_raw: &str, names_raw: &str) -> Vec<Sim> {
+    let numerics: Vec<&str> = numerics_raw.split(',').collect();
+    let names: Vec<&str> = names_raw.split(',').collect();
     // The two properties are filled in independently while the modem comes up, so mid-boot they
     // can disagree in length. Pairing them positionally then attaches one carrier's name to
     // another's MCCMNC, so drop the names entirely rather than report something false.
@@ -45,7 +47,11 @@ pub fn sims() -> Vec<Sim> {
         .filter(|(_, n)| !n.is_empty())
         .map(|(i, mccmnc)| Sim {
             mccmnc: mccmnc.to_string(),
-            spn: if aligned { names[i].trim().to_string() } else { String::new() },
+            spn: if aligned {
+                names[i].trim().to_string()
+            } else {
+                String::new()
+            },
         })
         .collect()
 }
@@ -104,24 +110,34 @@ pub fn from_config_cache(dir: &Path) -> Vec<String> {
         };
         // <string name="carrier_config_version_string">tinkoff_ru-77000000001.21&#10;…</string>
         let rest = &text[i..];
-        let Some(start) = rest.find('>') else { continue };
-        let Some(end) = rest[start..].find('<') else { continue };
+        let Some(start) = rest.find('>') else {
+            continue;
+        };
+        let Some(end) = rest[start..].find('<') else {
+            continue;
+        };
         let value = &rest[start + 1..start + end];
-        // Cut at the first dash followed by a digit: the value is "<canonical>-<version>", the
-        // version may carry a trailing date ("...&#10;2025-11-12"), and a canonical name may
-        // itself contain dashes — so neither the first nor the last dash is the right one.
-        let cut = value
-            .char_indices()
-            .find(|(i, c)| *c == '-' && value[i + 1..].starts_with(|n: char| n.is_ascii_digit()))
-            .map(|(i, _)| i);
-        if let Some(cut) = cut {
-            let canonical = &value[..cut];
-            if !canonical.is_empty() && !out.iter().any(|c| c == canonical) {
-                out.push(canonical.to_string());
-            }
+        if let Some(canonical) = canonical_from_version(value)
+            && !out.iter().any(|c| c == canonical)
+        {
+            out.push(canonical.to_string());
         }
     }
     out
+}
+
+/// Pull the carrier's canonical name out of a carrier_config_version_string.
+///
+/// The value is "<canonical>-<version>", the version may carry a trailing date
+/// ("...&#10;2025-11-12"), and a canonical name may itself contain dashes — so neither the first
+/// nor the last dash is the right place to cut. The version always starts with a digit.
+pub fn canonical_from_version(value: &str) -> Option<&str> {
+    let cut = value
+        .char_indices()
+        .find(|(i, c)| *c == '-' && value[i + 1..].starts_with(|n: char| n.is_ascii_digit()))
+        .map(|(i, _)| i)?;
+    let canonical = &value[..cut];
+    (!canonical.is_empty()).then_some(canonical)
 }
 
 /// Canonical names saved by service.sh once telephony was up.
@@ -140,4 +156,55 @@ pub fn load_carrier_list(dir: &Path) -> Result<CarrierList, String> {
     let path = dir.join("carrier_list.pb");
     let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     CarrierList::parse_from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_stops_before_the_version() {
+        // A real value: the version carries a date, whose dash must not be mistaken for the cut.
+        assert_eq!(
+            canonical_from_version("tinkoff_ru-77000000001.21&#10;2025-11-12"),
+            Some("tinkoff_ru")
+        );
+        // An unnamed carrier's entry is called after its MCCMNC, digits and all.
+        assert_eq!(
+            canonical_from_version("25001-77000000119.21"),
+            Some("25001")
+        );
+        // A canonical name may contain dashes of its own.
+        assert_eq!(
+            canonical_from_version("t-mobile_us-123.4"),
+            Some("t-mobile_us")
+        );
+        assert_eq!(canonical_from_version(""), None);
+        assert_eq!(canonical_from_version("no-version-here"), None);
+    }
+
+    #[test]
+    fn sims_pair_by_slot() {
+        let sims = pair_sims("25062,25001", "T-Mobile,МТС");
+        assert_eq!(sims.len(), 2);
+        assert_eq!(sims[0].mccmnc, "25062");
+        assert_eq!(sims[0].spn, "T-Mobile");
+        assert_eq!(sims[1].spn, "МТС");
+    }
+
+    #[test]
+    fn misaligned_properties_yield_no_names() {
+        // The modem fills the two properties independently, so mid-boot they can disagree in
+        // length. Pairing them positionally then attaches one carrier's name to another's
+        // MCCMNC — the SIMs are still reported, but without names.
+        let sims = pair_sims("25001", "T-Mobile,МТС");
+        assert_eq!(sims.len(), 1);
+        assert_eq!(sims[0].mccmnc, "25001");
+        assert_eq!(sims[0].spn, "");
+    }
+
+    #[test]
+    fn no_sims_at_all() {
+        assert!(pair_sims("", "").is_empty());
+    }
 }

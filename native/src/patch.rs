@@ -25,9 +25,12 @@ pub fn volte_enabled(settings: &CarrierSettings) -> bool {
         .config
         .iter()
         .find(|c| c.key() == VOLTE_KEY)
-        .is_some_and(
-            |c| matches!(c.value, Some(carrier_config::config::Value::BoolValue(true))),
-        )
+        .is_some_and(|c| {
+            matches!(
+                c.value,
+                Some(carrier_config::config::Value::BoolValue(true))
+            )
+        })
 }
 
 fn set_bools(settings: &mut CarrierSettings, carrier: &Carrier) -> usize {
@@ -90,11 +93,10 @@ fn add_ims_apn(settings: &mut CarrierSettings, carrier: &Carrier) -> String {
         return "disabled in config".to_string();
     }
     let apns = settings.apns.mut_or_insert_default();
-    if apns
-        .apn
-        .iter()
-        .any(|a| a.type_.contains(&EnumOrUnknown::new(apn_item::ApnType::IMS)))
-    {
+    if apns.apn.iter().any(|a| {
+        a.type_
+            .contains(&EnumOrUnknown::new(apn_item::ApnType::IMS))
+    }) {
         return "already present, skipped".to_string();
     }
 
@@ -156,4 +158,98 @@ pub fn patch_single(
     let report = patch_settings(&mut settings, carrier);
     settings.set_version(settings.version() + 1);
     Ok((settings.write_to_bytes()?, report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Carrier;
+
+    fn stock_carrier(name: &str) -> CarrierSettings {
+        let mut s = CarrierSettings::new();
+        s.set_canonical_name(name.to_string());
+        s.set_version(100);
+        s
+    }
+
+    #[test]
+    fn patching_fills_an_empty_entry() {
+        let mut settings = stock_carrier("25001");
+        let report = patch_settings(&mut settings, &Carrier::new("25001".into()));
+
+        assert!(report.keys_written > 0);
+        assert!(report.apn.starts_with("added"));
+        assert!(volte_enabled(&settings));
+        assert!(settings.apns.apn.iter().any(|a| {
+            a.type_
+                .contains(&EnumOrUnknown::new(apn_item::ApnType::IMS))
+        }));
+    }
+
+    #[test]
+    fn patching_twice_changes_nothing() {
+        // The boot-time run must be idempotent: if it ever reads its own output, a second pass
+        // has to be a no-op rather than pile changes on top.
+        let carrier = Carrier::new("25001".into());
+        let mut settings = stock_carrier("25001");
+        patch_settings(&mut settings, &carrier);
+
+        let second = patch_settings(&mut settings, &carrier);
+        assert_eq!(second.keys_written, 0);
+        assert_eq!(second.apn, "already present, skipped");
+    }
+
+    #[test]
+    fn a_carrier_google_supports_is_recognised() {
+        let mut settings = stock_carrier("some_carrier");
+        assert!(!volte_enabled(&settings), "empty config is not certified");
+
+        let configs = settings.configs.mut_or_insert_default();
+        let mut cfg = carrier_config::Config::new();
+        cfg.set_key(VOLTE_KEY.to_string());
+        cfg.value = Some(carrier_config::config::Value::BoolValue(false));
+        configs.config.push(cfg);
+        assert!(
+            !volte_enabled(&settings),
+            "an explicit false is not certified"
+        );
+
+        settings.configs.mut_or_insert_default().config[0].value =
+            Some(carrier_config::config::Value::BoolValue(true));
+        assert!(volte_enabled(&settings));
+    }
+
+    #[test]
+    fn fields_outside_our_schema_survive_a_patch() {
+        // The reason this uses rust-protobuf rather than prost: Google may add fields to
+        // CarrierSettings at any time, and dropping the ones we do not know would quietly
+        // discard data for every other carrier in the file.
+        let mut multi = MultiCarrierSettings::new();
+        multi.set_version(7);
+        multi.setting.push(stock_carrier("25001"));
+
+        let mut bytes = multi.write_to_bytes().unwrap();
+        // field 99, varint, value 42 — nothing in our schema claims it
+        let unknown = [0x98u8, 0x06, 0x2A];
+        bytes.extend_from_slice(&unknown);
+
+        let parsed = parse_others(&bytes).unwrap();
+        let (out, reports) = patch_others(parsed, &[Carrier::new("25001".into())]).unwrap();
+
+        assert_eq!(reports.len(), 1);
+        assert!(
+            out.windows(unknown.len()).any(|w| w == unknown),
+            "the unknown field was dropped"
+        );
+    }
+
+    #[test]
+    fn version_is_derived_from_the_stock_one() {
+        let mut multi = MultiCarrierSettings::new();
+        multi.set_version(41);
+        multi.setting.push(stock_carrier("25001"));
+
+        let (out, _) = patch_others(multi, &[Carrier::new("25001".into())]).unwrap();
+        assert_eq!(parse_others(&out).unwrap().version(), 42);
+    }
 }

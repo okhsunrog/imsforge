@@ -35,6 +35,8 @@ fi
         # Files created at runtime inherit adb_data_file from /data/adb. Mounted over /product
         # with that label, com.google.android.carrier cannot read them — so relabel to match a
         # stock file.
+        # ls, because find cannot print an SELinux context and the path is fixed anyway.
+        # shellcheck disable=SC2012
         ctx=$(ls -Z /product/etc/CarrierSettings/carrier_list.pb 2>/dev/null | awk '{print $1}')
         if [ -n "$ctx" ]; then
             chcon "$ctx" "$OUT"/*.pb 2>/dev/null && echo "  relabelled to $ctx"

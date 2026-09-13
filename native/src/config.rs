@@ -128,11 +128,66 @@ impl Config {
     /// A missing file is not an error: it means "defaults", which is the normal case.
     pub fn load(path: &Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
-            Ok(text) => {
-                serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
-            }
+            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> Result<Config, String> {
+        serde_json::from_str(json).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn a_missing_file_means_defaults() {
+        // The normal case is no config at all, so this must not be an error.
+        let cfg = Config::load(Path::new("/nonexistent/carriers.json")).unwrap();
+        assert!(cfg.auto);
+        assert!(cfg.carriers.is_empty());
+        assert!(cfg.skip.is_empty());
+    }
+
+    #[test]
+    fn a_misspelled_key_is_rejected() {
+        // Silently ignoring it would leave the user staring at a setting that does nothing.
+        assert!(parse(r#"{"carriers":[{"canonical_name":"25001","ims_apn_nam":"x"}]}"#).is_err());
+        assert!(parse(r#"{"carrierz":[]}"#).is_err());
+    }
+
+    #[test]
+    fn the_apn_label_falls_back_to_the_carrier_name() {
+        let carrier = Carrier::new("25001".into());
+        assert_eq!(carrier.apn_name(), "25001 IMS");
+
+        let named: Config =
+            parse(r#"{"carriers":[{"canonical_name":"25001","ims_apn_name":"МТС IMS"}]}"#).unwrap();
+        assert_eq!(named.carriers[0].apn_name(), "МТС IMS");
+    }
+
+    #[test]
+    fn overrides_replace_rather_than_append() {
+        let cfg: Config = parse(
+            r#"{"carriers":[{"canonical_name":"x","bools":{"vonr_enabled_bool":false,"new_key_bool":true}}]}"#,
+        )
+        .unwrap();
+        let configs = cfg.carriers[0].configs();
+
+        let vonr: Vec<_> = configs
+            .iter()
+            .filter(|(k, _)| k == "vonr_enabled_bool")
+            .collect();
+        assert_eq!(vonr.len(), 1, "the key must not be written twice");
+        assert!(!vonr[0].1);
+        assert!(configs.iter().any(|(k, v)| k == "new_key_bool" && *v));
+        assert!(
+            configs
+                .iter()
+                .any(|(k, v)| k == "carrier_volte_available_bool" && *v)
+        );
     }
 }

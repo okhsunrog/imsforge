@@ -141,7 +141,10 @@ fn refresh_cache(src: &Path, cache: &Path, names: &[String], output: &[u8]) {
             let _ = std::fs::copy(&from, cache.join(&name));
         }
     }
-    let _ = std::fs::write(cache.join("output.fingerprint"), fingerprint(output).to_string());
+    let _ = std::fs::write(
+        cache.join("output.fingerprint"),
+        fingerprint(output).to_string(),
+    );
 }
 
 struct Target {
@@ -170,9 +173,10 @@ fn name_apns(targets: &mut [Target], sims: &[(String, String)]) {
         if !t.carrier.ims_apn_name.is_empty() {
             continue;
         }
-        if let Some((_, spn)) = sims.iter().find(|(name, spn)| {
-            *name == t.carrier.canonical_name && !spn.is_empty()
-        }) {
+        if let Some((_, spn)) = sims
+            .iter()
+            .find(|(name, spn)| *name == t.carrier.canonical_name && !spn.is_empty())
+        {
             t.carrier.ims_apn_name = format!("{spn} IMS");
         }
     }
@@ -186,7 +190,11 @@ fn name_apns(targets: &mut [Target], sims: &[(String, String)]) {
 /// is never shadowed and the cache has no reason to hold a copy.
 /// Targets to patch, plus every carrier we considered — the cache needs the stock files of the
 /// skipped ones too, or a later run has nothing to judge them by.
-fn targets(cfg: &Config, data_src: &Path, args: &Args) -> Result<(Vec<Target>, Vec<String>), String> {
+fn targets(
+    cfg: &Config,
+    data_src: &Path,
+    args: &Args,
+) -> Result<(Vec<Target>, Vec<String>), String> {
     // Which carriers are in this phone? Three sources, in order of quality.
     //
     // At post-fs-data the modem is not up yet, so the SIM properties are empty and only the last
@@ -230,7 +238,12 @@ fn targets(cfg: &Config, data_src: &Path, args: &Args) -> Result<(Vec<Target>, V
         .collect();
 
     let mut candidates: Vec<String> = resolved.iter().map(|(n, _)| n.clone()).collect();
-    for name in cfg.carriers.iter().map(|c| &c.canonical_name).chain(cfg.skip.iter()) {
+    for name in cfg
+        .carriers
+        .iter()
+        .map(|c| &c.canonical_name)
+        .chain(cfg.skip.iter())
+    {
         if !candidates.contains(name) {
             candidates.push(name.clone());
         }
