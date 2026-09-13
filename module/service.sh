@@ -11,9 +11,25 @@ until [ "$(getprop sys.boot_completed)" = "1" ]; do
     sleep 2
 done
 
-# The modem usually needs a few more seconds after boot_completed to report the SIMs.
+# The modem fills gsm.sim.operator.numeric and .alpha independently and one slot at a time, so
+# reading too early yields a half-built list — or one carrier's name against another's MCCMNC.
+# Wait until both agree in length and stop changing.
+prev=""
+stable=0
 i=0
-while [ -z "$(getprop gsm.sim.operator.numeric | tr -d ,)" ] && [ "$i" -lt 30 ]; do
+while [ "$i" -lt 60 ]; do
+    numeric=$(getprop gsm.sim.operator.numeric)
+    alpha=$(getprop gsm.sim.operator.alpha)
+    slots_n=$(echo "$numeric" | tr ',' '\n' | grep -c .)
+    slots_a=$(echo "$alpha" | tr ',' '\n' | grep -c .)
+
+    if [ -n "$numeric" ] && [ "$slots_n" = "$slots_a" ] && [ "$numeric|$alpha" = "$prev" ]; then
+        stable=$((stable + 1))
+        [ "$stable" -ge 2 ] && break
+    else
+        stable=0
+    fi
+    prev="$numeric|$alpha"
     sleep 2
     i=$((i + 1))
 done

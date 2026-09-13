@@ -27,15 +27,25 @@ fn getprop(name: &str) -> String {
 
 /// SIMs currently in the phone. Both props are comma separated, one field per slot.
 pub fn sims() -> Vec<Sim> {
-    let numerics = getprop("gsm.sim.operator.numeric");
-    let names = getprop("gsm.sim.operator.alpha");
-    let mut spns = names.split(',');
+    let numerics: Vec<&str> = {
+        let s = Box::leak(getprop("gsm.sim.operator.numeric").into_boxed_str());
+        s.split(',').collect()
+    };
+    let names: Vec<&str> = {
+        let s = Box::leak(getprop("gsm.sim.operator.alpha").into_boxed_str());
+        s.split(',').collect()
+    };
+    // The two properties are filled in independently while the modem comes up, so mid-boot they
+    // can disagree in length. Pairing them positionally then attaches one carrier's name to
+    // another's MCCMNC, so drop the names entirely rather than report something false.
+    let aligned = numerics.len() == names.len();
     numerics
-        .split(',')
-        .filter(|n| !n.is_empty())
-        .map(|mccmnc| Sim {
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !n.is_empty())
+        .map(|(i, mccmnc)| Sim {
             mccmnc: mccmnc.to_string(),
-            spn: spns.next().unwrap_or("").trim().to_string(),
+            spn: if aligned { names[i].trim().to_string() } else { String::new() },
         })
         .collect()
 }
@@ -97,8 +107,14 @@ pub fn from_config_cache(dir: &Path) -> Vec<String> {
         let Some(start) = rest.find('>') else { continue };
         let Some(end) = rest[start..].find('<') else { continue };
         let value = &rest[start + 1..start + end];
-        // Trim the trailing "-<version>.<n>"; a canonical name may itself contain dashes.
-        if let Some(cut) = value.rfind('-') {
+        // Cut at the first dash followed by a digit: the value is "<canonical>-<version>", the
+        // version may carry a trailing date ("...&#10;2025-11-12"), and a canonical name may
+        // itself contain dashes — so neither the first nor the last dash is the right one.
+        let cut = value
+            .char_indices()
+            .find(|(i, c)| *c == '-' && value[i + 1..].starts_with(|n: char| n.is_ascii_digit()))
+            .map(|(i, _)| i);
+        if let Some(cut) = cut {
             let canonical = &value[..cut];
             if !canonical.is_empty() && !out.iter().any(|c| c == canonical) {
                 out.push(canonical.to_string());
