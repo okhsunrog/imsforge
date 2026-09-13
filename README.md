@@ -27,6 +27,8 @@ of type IMS** either. Without one the IMS PDN never comes up, the network hands 
 (the SIP proxy address), and registration cannot even start. imsforge adds the APN in the same
 patch.
 
+![imsforge WebUI](docs/webui.png)
+
 ## Requirements
 
 - A Pixel (or any device using Google's CarrierSettings) with root: KernelSU, KernelSU Next,
@@ -161,8 +163,9 @@ build.sh          cross-compiles and packs dist/imsforge.zip
 - `vonr_enabled_bool` does something only where the carrier actually runs 5G SA.
 - MVNOs are matched by MCCMNC and SPN. Those distinguished only by IMSI prefix or GID1 fall back
   to the generic entry; add an explicit override if that is wrong for you.
-- Verified on a Pixel 8 Pro (husky), Android 17, KernelSU Next with NoMount. The approach is not
-  device-specific, but that is what has been tested.
+- Verified on a Pixel 8 Pro (husky), Android 17, KernelSU Next with NoMount. Magisk is
+  expected to work — it documents the same script ordering and mounts module files itself — but
+  it has not been tested on a device.
 
 ## Credits
 
