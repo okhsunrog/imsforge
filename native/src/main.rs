@@ -30,6 +30,9 @@ struct Args {
     out: Option<PathBuf>,
     config: PathBuf,
     cache: Option<PathBuf>,
+    sims: PathBuf,
+    phone_files: PathBuf,
+    save: bool,
 }
 
 fn usage() -> ! {
@@ -38,10 +41,14 @@ fn usage() -> ! {
                 imsforge detect [--src <dir>]\n\
          \n\
          patch    patch the CarrierSettings protobufs into <dir>\n\
-         detect   print, as JSON, what the inserted SIMs resolve to and whether they need us\n\
+         detect   print, as JSON, what the inserted SIMs resolve to\n\
          \n\
-         --src     stock CarrierSettings directory (default: {DEFAULT_SRC})\n\
-         --config  carrier overrides (default: <module dir>/carriers.json)"
+         --src           stock CarrierSettings directory (default: {DEFAULT_SRC})\n\
+         --config        carrier overrides (default: /data/adb/imsforge/carriers.json)\n\
+         --cache         stock snapshot (default: /data/adb/imsforge/stock)\n\
+         --sims          carriers remembered for the next boot (default: /data/adb/imsforge/sims)\n\
+         --phone-files   telephony config cache to read carriers from when the modem is down\n\
+         --save          with detect: remember the carriers for the next boot"
     );
     std::process::exit(2)
 }
@@ -59,6 +66,9 @@ fn parse_args() -> Args {
     // Config and cache live outside the module directory: a module update replaces that
     // directory wholesale, which would throw away the user's settings every time.
     let mut config = PathBuf::from("/data/adb/imsforge/carriers.json");
+    let mut sims = PathBuf::from("/data/adb/imsforge/sims");
+    let mut phone_files = PathBuf::from("/data/user_de/0/com.android.phone/files");
+    let mut save = false;
 
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -66,6 +76,9 @@ fn parse_args() -> Args {
             "--out" => out = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--config" => config = PathBuf::from(it.next().unwrap_or_else(|| usage())),
             "--cache" => cache = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
+            "--sims" => sims = PathBuf::from(it.next().unwrap_or_else(|| usage())),
+            "--phone-files" => phone_files = PathBuf::from(it.next().unwrap_or_else(|| usage())),
+            "--save" => save = true,
             _ => usage(),
         }
     }
@@ -75,6 +88,9 @@ fn parse_args() -> Args {
         out,
         config,
         cache,
+        sims,
+        phone_files,
+        save,
     }
 }
 
@@ -168,15 +184,36 @@ fn name_apns(targets: &mut [Target], sims: &[(String, String)]) {
 /// `data_src` is where the carrier settings come from (possibly our cached stock), while
 /// `list_src` is always the live /product: carrier_list.pb is never something we patch, so it
 /// is never shadowed and the cache has no reason to hold a copy.
-fn targets(cfg: &Config, data_src: &Path, list_src: &Path) -> Result<Vec<Target>, String> {
-    // canonical name -> SPN, for both auto-detection and APN labelling
+fn targets(cfg: &Config, data_src: &Path, args: &Args) -> Result<Vec<Target>, String> {
+    // Which carriers are in this phone? Three sources, in order of quality.
+    //
+    // At post-fs-data the modem is not up yet, so the SIM properties are empty and only the last
+    // two work — which is the normal case for the boot-time run, not the exception.
     let mut resolved: Vec<(String, String)> = Vec::new();
-    if let Ok(list) = detect::load_carrier_list(list_src) {
+    let mut source = "live SIM properties";
+    if let Ok(list) = detect::load_carrier_list(&args.src) {
         for sim in detect::sims() {
             if let Some(name) = detect::resolve(&list, &sim) {
                 resolved.push((name, sim.spn));
             }
         }
+    }
+    if resolved.is_empty() {
+        resolved = detect::from_saved(&args.sims)
+            .into_iter()
+            .map(|n| (n, String::new()))
+            .collect();
+        source = "saved by the previous boot";
+    }
+    if resolved.is_empty() {
+        resolved = detect::from_config_cache(&args.phone_files)
+            .into_iter()
+            .map(|n| (n, String::new()))
+            .collect();
+        source = "telephony's own config cache";
+    }
+    if !resolved.is_empty() {
+        println!("  carriers in this phone, from {source}");
     }
 
     let mut targets: Vec<Target> = cfg
@@ -198,7 +235,7 @@ fn targets(cfg: &Config, data_src: &Path, list_src: &Path) -> Result<Vec<Target>
     // Auto-detection is a convenience: if the carrier list is unreadable we say so and still
     // honour whatever the config asked for, rather than failing the whole run.
     if resolved.is_empty() {
-        eprintln!("  auto-detection found nothing (no SIM, or carrier_list.pb unreadable)");
+        eprintln!("  no carriers identified — nothing to detect automatically");
         name_apns(&mut targets, &resolved);
         return Ok(targets);
     }
@@ -244,8 +281,12 @@ fn cmd_detect(args: &Args) -> Result<(), String> {
     let cfg = Config::load(&args.config)?;
     let list = detect::load_carrier_list(&args.src)?;
     let mut items = Vec::new();
+    let mut names = Vec::new();
     for sim in detect::sims() {
         let name = detect::resolve(&list, &sim);
+        if let Some(n) = &name {
+            names.push(n.clone());
+        }
         items.push(format!(
             r#"{{"mccmnc":"{}","spn":"{}","canonical_name":{}}}"#,
             sim.mccmnc,
@@ -254,6 +295,15 @@ fn cmd_detect(args: &Args) -> Result<(), String> {
         ));
     }
     println!(r#"{{"auto":{},"sims":[{}]}}"#, cfg.auto, items.join(","));
+
+    // Persist the mapping for the next boot, when the modem will not be up in time.
+    if args.save && !names.is_empty() {
+        if let Some(dir) = args.sims.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::fs::write(&args.sims, names.join("\n") + "\n")
+            .map_err(|e| format!("{}: {e}", args.sims.display()))?;
+    }
     Ok(())
 }
 
@@ -269,7 +319,7 @@ fn cmd_patch(args: &Args) -> Result<(), String> {
     if src != args.src {
         println!("  /product is already shadowed by us, reading the cached stock instead");
     }
-    let targets = targets(&cfg, &src, &args.src)?;
+    let targets = targets(&cfg, &src, args)?;
     if targets.is_empty() {
         println!("nothing to patch");
         return Ok(());

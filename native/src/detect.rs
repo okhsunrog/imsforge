@@ -69,6 +69,57 @@ pub fn resolve(list: &CarrierList, sim: &Sim) -> Option<String> {
     generic
 }
 
+/// Canonical names taken from telephony's own carrier config cache.
+///
+/// At post-fs-data the modem is not up, so the SIM properties are empty and live detection is
+/// impossible. Telephony, however, leaves a cache file per SIM from the previous boot, and its
+/// `carrier_config_version_string` starts with exactly the canonical name we need — a record the
+/// system maintains for us. We read it before the cache is cleared.
+pub fn from_config_cache(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("carrierconfig-") || !name.ends_with(".xml") || name.contains("nosim")
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Some(i) = text.find("carrier_config_version_string") else {
+            continue;
+        };
+        // <string name="carrier_config_version_string">tinkoff_ru-77000000001.21&#10;…</string>
+        let rest = &text[i..];
+        let Some(start) = rest.find('>') else { continue };
+        let Some(end) = rest[start..].find('<') else { continue };
+        let value = &rest[start + 1..start + end];
+        // Trim the trailing "-<version>.<n>"; a canonical name may itself contain dashes.
+        if let Some(cut) = value.rfind('-') {
+            let canonical = &value[..cut];
+            if !canonical.is_empty() && !out.iter().any(|c| c == canonical) {
+                out.push(canonical.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Canonical names saved by service.sh once telephony was up.
+pub fn from_saved(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .map(|t| {
+            t.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn load_carrier_list(dir: &Path) -> Result<CarrierList, String> {
     let path = dir.join("carrier_list.pb");
     let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;

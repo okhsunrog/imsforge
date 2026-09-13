@@ -25,8 +25,8 @@ echo "==> assembling $STAGE"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin"
 install -m 755 "native/target/$TARGET/release/imsforge" "$STAGE/bin/imsforge"
-install -m 755 module/post-fs-data.sh module/action.sh module/customize.sh \
-    module/uninstall.sh "$STAGE/"
+install -m 755 module/post-fs-data.sh module/service.sh module/action.sh \
+    module/customize.sh module/uninstall.sh "$STAGE/"
 install -m 644 module/module.prop "$STAGE/"
 mkdir -p "$STAGE/webroot"
 install -m 644 module/webroot/* "$STAGE/webroot/"

@@ -106,7 +106,11 @@ snapshot behind.
 
 The patcher then:
 
-1. resolves the inserted SIMs to canonical names through `carrier_list.pb`, matching MVNOs by SPN;
+1. works out which carriers are in the phone. At post-fs-data the modem is not up yet, so the
+   SIM properties are empty and live detection is impossible — the boot-time run instead uses the
+   list `service.sh` saved once telephony was awake on the previous boot, falling back to the
+   canonical names telephony leaves in its own carrier config cache. Live properties, resolved
+   through `carrier_list.pb` with MVNOs matched by SPN, are used whenever the tool runs later;
 2. skips carriers whose stock entry already has `carrier_volte_available_bool = true`;
 3. fills in the `configs` block, adds an IMS APN labelled after the carrier name the SIM
    reports, bumps the version field (so the result is
