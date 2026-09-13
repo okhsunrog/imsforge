@@ -184,7 +184,9 @@ fn name_apns(targets: &mut [Target], sims: &[(String, String)]) {
 /// `data_src` is where the carrier settings come from (possibly our cached stock), while
 /// `list_src` is always the live /product: carrier_list.pb is never something we patch, so it
 /// is never shadowed and the cache has no reason to hold a copy.
-fn targets(cfg: &Config, data_src: &Path, args: &Args) -> Result<Vec<Target>, String> {
+/// Targets to patch, plus every carrier we considered — the cache needs the stock files of the
+/// skipped ones too, or a later run has nothing to judge them by.
+fn targets(cfg: &Config, data_src: &Path, args: &Args) -> Result<(Vec<Target>, Vec<String>), String> {
     // Which carriers are in this phone? Three sources, in order of quality.
     //
     // At post-fs-data the modem is not up yet, so the SIM properties are empty and only the last
@@ -227,9 +229,16 @@ fn targets(cfg: &Config, data_src: &Path, args: &Args) -> Result<Vec<Target>, St
         })
         .collect();
 
+    let mut candidates: Vec<String> = resolved.iter().map(|(n, _)| n.clone()).collect();
+    for name in cfg.carriers.iter().map(|c| &c.canonical_name).chain(cfg.skip.iter()) {
+        if !candidates.contains(name) {
+            candidates.push(name.clone());
+        }
+    }
+
     if !cfg.auto {
         name_apns(&mut targets, &resolved);
-        return Ok(targets);
+        return Ok((targets, candidates));
     }
 
     // Auto-detection is a convenience: if the carrier list is unreadable we say so and still
@@ -237,7 +246,7 @@ fn targets(cfg: &Config, data_src: &Path, args: &Args) -> Result<Vec<Target>, St
     if resolved.is_empty() {
         eprintln!("  no carriers identified — nothing to detect automatically");
         name_apns(&mut targets, &resolved);
-        return Ok(targets);
+        return Ok((targets, candidates));
     }
     let others_bytes =
         std::fs::read(data_src.join("others.pb")).map_err(|e| format!("others.pb: {e}"))?;
@@ -274,7 +283,7 @@ fn targets(cfg: &Config, data_src: &Path, args: &Args) -> Result<Vec<Target>, St
         });
     }
     name_apns(&mut targets, &resolved);
-    Ok(targets)
+    Ok((targets, candidates))
 }
 
 fn cmd_detect(args: &Args) -> Result<(), String> {
@@ -319,7 +328,7 @@ fn cmd_patch(args: &Args) -> Result<(), String> {
     if src != args.src {
         println!("  /product is already shadowed by us, reading the cached stock instead");
     }
-    let targets = targets(&cfg, &src, args)?;
+    let (targets, candidates) = targets(&cfg, &src, args)?;
     if targets.is_empty() {
         println!("nothing to patch");
         return Ok(());
@@ -377,8 +386,7 @@ fn cmd_patch(args: &Args) -> Result<(), String> {
         if changed == 0 {
             println!("  source is already patched, keeping the existing stock cache");
         } else {
-            let names: Vec<String> = carriers.iter().map(|c| c.canonical_name.clone()).collect();
-            refresh_cache(&src, &cache, &names, &patched_others);
+            refresh_cache(&src, &cache, &candidates, &patched_others);
         }
     }
     Ok(())
