@@ -84,7 +84,6 @@ WebUI либо руками в `/data/adb/modules/imsforge/carriers.json` — с
   "carriers": [
     {
       "canonical_name": "25001",
-      "ims_apn_name": "MTS IMS",
       "int_arrays": { "carrier_nr_availabilities_int_array": [1, 2] }
     }
   ]
@@ -93,8 +92,10 @@ WebUI либо руками в `/data/adb/modules/imsforge/carriers.json` — с
 
 `canonical_name` — идентификатор, которым Google оперирует внутри CarrierSettings; у безымянного
 оператора это просто MCCMNC. WebUI показывает правильное имя для каждой вставленной симки, а
-`imsforge detect` печатает его в JSON. Остальные ключи: `ims_apn_value`, `ims_apn: false`,
-`bools`, `int_arrays`, плюс `auto: false` и `skip: ["имя"]` на верхнем уровне.
+`imsforge detect` печатает его в JSON. Остальные ключи: `ims_apn_name` (косметика: подпись в
+Настройки → APN, которая иначе берётся из имени оператора, сообщаемого симкой),
+`ims_apn_value`, `ims_apn: false`, `bools`, `int_arrays`, плюс `auto: false` и `skip: ["имя"]`
+на верхнем уровне.
 
 Набор ключей повторяет то, что выставляет PixelIMS, минус `carrier_supports_ss_over_ut_bool` —
 он ломает переадресацию, если у оператора не работает XCAP.
@@ -113,7 +114,8 @@ adjust their modules before it gets mounted.»* Значит в этот мом�
 1. определяет вставленные симки и резолвит их в canonical-имена через `carrier_list.pb`, МВНО —
    по SPN;
 2. пропускает операторов, у которых в стоке уже стоит `carrier_volte_available_bool = true`;
-3. заполняет блок `configs`, добавляет IMS-APN, инкрементирует версию (чтобы результат было
+3. заполняет блок `configs`, добавляет IMS-APN с подписью по имени оператора из симки,
+   инкрементирует версию (чтобы результат было
    видно как `carrier_config_version_string` в `dumpsys carrier_config`);
 4. пишет в собственный каталог модуля и переставляет файлам контекст `system_file` — файлы,
    созданные в `/data/adb`, наследуют метку, с которой конфиг-приложение их не прочитает;

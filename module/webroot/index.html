@@ -24,40 +24,19 @@
   </div>
 
   <section class="card">
-    <h2>Status</h2>
-    <div class="rows" id="status-rows">
-      <div class="skeleton"></div>
-    </div>
-    <details id="log-details">
-      <summary>Last boot log</summary>
-      <pre id="log">—</pre>
-    </details>
-  </section>
-
-  <section class="card">
-    <h2>SIM cards</h2>
-    <p class="hint">
-      Carriers are detected automatically. Ones Google already certified are left alone — their
-      config is curated, and overwriting it can break working VoLTE.
-    </p>
+    <h2>Your SIM cards</h2>
     <div id="sims"><div class="skeleton"></div></div>
   </section>
 
   <section class="card">
-    <h2>IMS</h2>
-    <div class="rows" id="ims-rows"><div class="skeleton"></div></div>
-    <p class="hint" id="ims-hint" hidden></p>
-  </section>
-
-  <section class="card">
-    <h2>Overrides</h2>
-    <p class="hint">
-      Only needed for extras: a non-standard IMS APN, additional config keys, or forcing a
-      carrier that detection skipped.
-    </p>
-    <div id="carriers"></div>
+    <h2>Module</h2>
+    <div class="rows" id="status-rows"><div class="skeleton"></div></div>
+    <details>
+      <summary>Last boot log</summary>
+      <pre id="log">—</pre>
+    </details>
     <details id="raw-details">
-      <summary>Edit raw JSON</summary>
+      <summary>Edit configuration as JSON</summary>
       <textarea id="raw" spellcheck="false" rows="12"></textarea>
       <div class="row-actions">
         <span class="error" id="raw-error"></span>

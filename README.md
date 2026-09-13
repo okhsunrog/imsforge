@@ -79,7 +79,6 @@ carrier that detection skipped. Edit them in the WebUI, or write
   "carriers": [
     {
       "canonical_name": "25001",
-      "ims_apn_name": "MTS IMS",
       "int_arrays": { "carrier_nr_availabilities_int_array": [1, 2] }
     }
   ]
@@ -88,8 +87,9 @@ carrier that detection skipped. Edit them in the WebUI, or write
 
 `canonical_name` is the identifier Google uses inside CarrierSettings — for an unnamed carrier
 it is just the MCCMNC. The WebUI shows the right one for every inserted SIM, and
-`imsforge detect` prints it as JSON. Other keys: `ims_apn_value`, `ims_apn: false`, `bools`,
-`int_arrays`, plus top-level `auto: false` and `skip: ["name"]`.
+`imsforge detect` prints it as JSON. Other keys: `ims_apn_name` (cosmetic: the label shown in
+Settings → APNs, which otherwise comes from the name the SIM reports), `ims_apn_value`,
+`ims_apn: false`, `bools`, `int_arrays`, plus top-level `auto: false` and `skip: ["name"]`.
 
 The key set written for each carrier mirrors what PixelIMS sets, minus
 `carrier_supports_ss_over_ut_bool` — that one breaks call forwarding when the carrier's XCAP
@@ -108,7 +108,8 @@ The patcher then:
 
 1. resolves the inserted SIMs to canonical names through `carrier_list.pb`, matching MVNOs by SPN;
 2. skips carriers whose stock entry already has `carrier_volte_available_bool = true`;
-3. fills in the `configs` block, adds an IMS APN, bumps the version field (so the result is
+3. fills in the `configs` block, adds an IMS APN labelled after the carrier name the SIM
+   reports, bumps the version field (so the result is
    visible as `carrier_config_version_string` in `dumpsys carrier_config`);
 4. writes into the module's own directory and relabels the files to `system_file`, because files
    created under `/data/adb` inherit a context the carrier config app cannot read;

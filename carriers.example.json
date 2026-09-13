@@ -1,12 +1,11 @@
 {
-  "_comment": "Optional. Copy to /data/adb/modules/imsforge/carriers.json to override anything. Without this file imsforge patches whatever the inserted SIMs need, which is the normal case.",
+  "_comment": "Optional. Copy to /data/adb/modules/imsforge/carriers.json only if you need an override. Without this file imsforge patches whatever the inserted SIMs need, which is the normal case.",
 
   "auto": true,
 
   "carriers": [
     {
       "canonical_name": "25001",
-      "ims_apn_name": "MTS IMS",
       "int_arrays": { "carrier_nr_availabilities_int_array": [1, 2] }
     }
   ],

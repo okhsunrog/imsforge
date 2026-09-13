@@ -134,6 +134,24 @@ struct Target {
     reason: &'static str,
 }
 
+/// Default the IMS APN label to the carrier name the SIM reports.
+///
+/// Purely cosmetic — the APN works off its value and type, not its label — but without it the
+/// entry shows up in Settings as "25001 IMS" next to Google's own "MTS Internet" and "MTS MMS",
+/// which reads like a glitch.
+fn name_apns(targets: &mut [Target], sims: &[(String, String)]) {
+    for t in targets.iter_mut() {
+        if !t.carrier.ims_apn_name.is_empty() {
+            continue;
+        }
+        if let Some((_, spn)) = sims.iter().find(|(name, spn)| {
+            *name == t.carrier.canonical_name && !spn.is_empty()
+        }) {
+            t.carrier.ims_apn_name = format!("{spn} IMS");
+        }
+    }
+}
+
 /// Decide what to patch: explicit entries always, auto-detected ones only where Google has not
 /// already enabled VoLTE.
 ///
@@ -141,6 +159,16 @@ struct Target {
 /// `list_src` is always the live /product: carrier_list.pb is never something we patch, so it
 /// is never shadowed and the cache has no reason to hold a copy.
 fn targets(cfg: &Config, data_src: &Path, list_src: &Path) -> Result<Vec<Target>, String> {
+    // canonical name -> SPN, for both auto-detection and APN labelling
+    let mut resolved: Vec<(String, String)> = Vec::new();
+    if let Ok(list) = detect::load_carrier_list(list_src) {
+        for sim in detect::sims() {
+            if let Some(name) = detect::resolve(&list, &sim) {
+                resolved.push((name, sim.spn));
+            }
+        }
+    }
+
     let mut targets: Vec<Target> = cfg
         .carriers
         .iter()
@@ -152,27 +180,22 @@ fn targets(cfg: &Config, data_src: &Path, list_src: &Path) -> Result<Vec<Target>
         .collect();
 
     if !cfg.auto {
+        name_apns(&mut targets, &resolved);
         return Ok(targets);
     }
 
     // Auto-detection is a convenience: if the carrier list is unreadable we say so and still
     // honour whatever the config asked for, rather than failing the whole run.
-    let list = match detect::load_carrier_list(list_src) {
-        Ok(list) => list,
-        Err(e) => {
-            eprintln!("  auto-detection unavailable: {e}");
-            return Ok(targets);
-        }
-    };
+    if resolved.is_empty() {
+        eprintln!("  auto-detection found nothing (no SIM, or carrier_list.pb unreadable)");
+        name_apns(&mut targets, &resolved);
+        return Ok(targets);
+    }
     let others_bytes =
         std::fs::read(data_src.join("others.pb")).map_err(|e| format!("others.pb: {e}"))?;
     let others = patch::parse_others(&others_bytes).map_err(|e| format!("others.pb: {e}"))?;
 
-    for sim in detect::sims() {
-        let Some(name) = detect::resolve(&list, &sim) else {
-            eprintln!("  {} ({}): unknown to carrier_list.pb", sim.mccmnc, sim.spn);
-            continue;
-        };
+    for (name, _) in resolved.clone() {
         if cfg.skip.contains(&name) || targets.iter().any(|t| t.carrier.canonical_name == name) {
             continue;
         }
@@ -201,6 +224,7 @@ fn targets(cfg: &Config, data_src: &Path, list_src: &Path) -> Result<Vec<Target>
             reason: "detected",
         });
     }
+    name_apns(&mut targets, &resolved);
     Ok(targets)
 }
 

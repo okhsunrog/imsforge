@@ -114,7 +114,7 @@ main { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
   margin-bottom: 10px;
 }
 .sim:last-child { margin-bottom: 0; }
-.sim-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.sim-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .sim-name { font-weight: 600; }
 .sim-meta {
   margin-top: 4px;
@@ -122,30 +122,54 @@ main { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
   font-size: 12px;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
-.sim-actions { margin-top: 10px; }
 
-.carrier {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+/* One switch per SIM, with an explicit on/off position — a button that only reads
+   "Never patch" leaves the current state invisible. */
+.switch {
+  flex: none;
+  width: 50px;
+  height: 30px;
+  padding: 0;
+  border-radius: 999px;
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
+  background: var(--line);
+  position: relative;
+  transition: background 0.18s;
 }
-.carrier .grow { flex: 1; min-width: 0; }
-.carrier .cname { font-weight: 600; font-size: 14px; }
-.carrier input {
+.switch .knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--card);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 0.18s;
+}
+.switch.on { background: var(--accent); border-color: var(--accent); }
+.switch.on .knob { transform: translateX(20px); }
+.switch:disabled { opacity: 0.4; }
+
+.sim-state { margin-top: 10px; font-size: 14px; }
+.sim-ims { margin-top: 4px; font-size: 13px; }
+.sim-ims.good { color: var(--ok); }
+.sim-ims.warn { color: var(--warn); }
+.sim-ims.muted { color: var(--muted); }
+
+.sim-adv { margin-top: 6px; }
+.sim-adv .hint { margin: 6px 0 0; }
+.field { display: block; margin-top: 8px; }
+.field span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+.field input {
   width: 100%;
-  margin-top: 4px;
-  padding: 6px 8px;
+  padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--bg);
   color: var(--fg);
-  font-size: 13px;
+  font-size: 14px;
 }
-.carrier .extra { margin-top: 4px; color: var(--muted); font-size: 12px; }
 
 button {
   font: inherit;
