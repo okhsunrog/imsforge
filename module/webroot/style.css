@@ -157,19 +157,6 @@ main { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
 .sim-ims.warn { color: var(--warn); }
 .sim-ims.muted { color: var(--muted); }
 
-.sim-adv { margin-top: 6px; }
-.sim-adv .hint { margin: 6px 0 0; }
-.field { display: block; margin-top: 8px; }
-.field span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
-.field input {
-  width: 100%;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg);
-  color: var(--fg);
-  font-size: 14px;
-}
 
 button {
   font: inherit;

@@ -222,35 +222,8 @@ function renderSims() {
     }
     if (line.textContent) card.append(line);
 
-    if (name) card.append(carrierAdvanced(name));
     box.append(card);
   });
-}
-
-/** Per-carrier extras, hidden until asked for. */
-function carrierAdvanced(name) {
-  const entry = state.config.carriers.find((c) => c.canonical_name === name);
-  const det = el('details', 'sim-adv');
-  det.append(el('summary', '', 'Advanced'));
-
-  if (!entry) {
-    det.append(el('p', 'hint',
-      'Turn the switch on to pin this carrier, then set a custom IMS APN name or extra keys.'));
-    return det;
-  }
-
-  const label = el('label', 'field');
-  label.append(el('span', '', 'IMS APN name'));
-  const input = el('input');
-  input.value = entry.ims_apn_name || '';
-  input.placeholder = `${name} IMS`;
-  input.oninput = () => { entry.ims_apn_name = input.value; syncRaw(); markDirty(); };
-  label.append(input);
-  det.append(label);
-
-  const extras = [...Object.keys(entry.int_arrays || {}), ...Object.keys(entry.bools || {})];
-  if (extras.length) det.append(el('p', 'hint', `Extra keys: ${extras.join(', ')}`));
-  return det;
 }
 
 function renderStatus(metaRes, implRes, md5Res, ccRes) {
