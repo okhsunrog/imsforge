@@ -156,6 +156,7 @@ async function loadAll() {
 
   renderSims();
   renderStatus(s);
+  syncRaw();
 
   // The carrier-side reason costs a 200 KB dump of telephony.registry, so it is only worth
   // fetching when something is actually wrong.
