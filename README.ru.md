@@ -1,12 +1,13 @@
 # imsforge
 
 Включает **VoLTE, VoWiFi и VoNR** на телефонах Pixel для операторов, которых Google не
-сертифицировал — патчит protobuf-файлы CarrierSettings и упаковывает их в модуль
-KernelSU/Magisk.
+сертифицировал.
 
-В отличие от [PixelIMS](https://github.com/kyujin-cho/pixel-volte-patch), после перезагрузки
-ничего нажимать не нужно: конфиг уже правильный к моменту старта телефонии, без приложения и
-без Shizuku.
+imsforge — модуль KernelSU/Magisk, который патчит protobuf-файлы CarrierSettings **на самом
+устройстве, при каждой загрузке**. Не нужен компьютер, не нужна сборка под конкретный телефон,
+не нужно ничего переделывать после обновления системы — и, в отличие от рантайм-утилит вроде
+[PixelIMS](https://github.com/kyujin-cho/pixel-volte-patch), не нужно ничего нажимать после
+перезагрузки.
 
 *[English version](README.md)*
 
@@ -14,14 +15,14 @@ KernelSU/Magisk.
 
 ## Почему VoLTE не работает изначально
 
-Pixel берёт carrier config не из AOSP-приложения `com.android.carrierconfig`, а из
-гугловского `com.google.android.carrier`, которое читает protobuf-файлы из
-`/product/etc/CarrierSettings/`. Оператор находится по MCCMNC через `carrier_list.pb`, дальше
-настройки берутся либо из `<canonical_name>.pb`, либо из общей пачки `others.pb`.
+Pixel берёт carrier config не из AOSP-приложения `com.android.carrierconfig`, а из гугловского
+`com.google.android.carrier`, которое читает protobuf-файлы из `/product/etc/CarrierSettings/`.
+Оператор находится по MCCMNC через `carrier_list.pb`, дальше настройки берутся либо из
+`<canonical_name>.pb`, либо из общей пачки `others.pb`.
 
 У несертифицированного оператора там лежат **только APN, а блок `configs` пустой**. Поэтому
 `carrier_volte_available_bool` остаётся `false`, IMS не регистрируется, и звонки уходят через
-CSFB на 2G/3G — что становится проблемой по мере отключения 3G.
+CSFB на 2G/3G — что становится реальной проблемой по мере отключения 3G.
 
 Есть и вторая половина, которую обычно упускают утилиты, просто переключающие флаги: у таких
 операторов, как правило, **нет APN типа IMS**. Без него IMS-PDN не поднимается, оператор не
@@ -32,136 +33,143 @@ CSFB на 2G/3G — что становится проблемой по мере
 
 - Pixel (или другое устройство, использующее гугловский CarrierSettings) с root: KernelSU,
   KernelSU Next, APatch или Magisk.
-- **Метамодуль монтирования.** Начиная с KernelSU 3.x менеджер сам файлы модулей больше не
-  монтирует — эта логика вынесена в подключаемый бэкенд. Без него модуль, доставляющий файлы,
-  молча ничего не делает: он числится установленным, его скрипты выполняются, а до файловой
-  системы ничего не доходит. Поставь один из:
+- **Бэкенд монтирования.** У Magisk он встроен. Начиная с KernelSU 3.x менеджер сам файлы
+  модулей больше не монтирует — это вынесено в подключаемый «метамодуль», и без него модуль,
+  доставляющий файлы, молча ничего не делает: он числится установленным, его скрипты
+  выполняются, а до файловой системы ничего не доходит. Поставь
   [NoMount](https://github.com/maxsteeel/nomount) (редирект путей на уровне VFS, не оставляет
   следов в `/proc/mounts`; требует `CONFIG_NOMOUNT=y` в ядре),
-  [Mountify](https://github.com/backslashxx/mountify) (OverlayFS, работает на любом ядре) или
-  [meta-overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs).
-  Команда `imsforge verify` сообщит, если метамодуля нет.
-- `adb` с root-доступом на устройстве и [uv](https://docs.astral.sh/uv/).
+  [Mountify](https://github.com/backslashxx/mountify) (OverlayFS, любое ядро) или
+  [meta-overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs). WebUI модуля прямо
+  сообщает, если бэкенда нет.
 
-## Быстрый старт
+## Установка
 
-```bash
-uv run imsforge carriers   # определить canonical-имена для симок в телефоне
-$EDITOR carriers.toml      # вписать их
-uv run imsforge pull       # снять стоковый CarrierSettings (модуль должен быть выключен!)
-uv run imsforge build      # пропатчить protobuf, собрать dist/imsforge.zip
-uv run imsforge install    # залить и поставить через ksud
-# перезагрузка
-uv run imsforge verify     # проверить, что всё реально применилось
+1. Поставить `imsforge.zip` в менеджере root.
+2. Перезагрузиться.
+
+Это вся процедура. Операторы вставленных симок определяются и патчатся автоматически, а тех,
+кого Google уже сертифицировал, модуль намеренно не трогает: у них выверенный конфиг, и
+перезапись его — рабочий способ сломать работающий VoLTE.
+
+## WebUI
+
+Интерфейс модуля открывается из менеджера (или через
+[KsuWebUI](https://github.com/a13e300/KsuWebUI)) и показывает прямо на телефоне:
+
+- есть ли бэкенд монтирования и дошёл ли патч до `/product`;
+- во что определилась каждая симка — пропатчена, пропущена или неизвестна;
+- какой carrier config в итоге использует телефония, состояние IMS-PDN и адрес P-CSCF;
+- переопределения — добавить, отредактировать, удалить, плюс редактор сырого JSON.
+
+Отдельно интерфейс объясняет два состояния, которые патчем не лечатся, чтобы они не выглядели
+как баг модуля:
+
+- **`mVopsSupport = 3`** — сеть не предлагает этой SIM голос по LTE (`2` — предлагает). Никакой
+  carrier config это не переопределит.
+- **`IWLAN_IKEV2_AUTH_FAILURE`** — ePDG оператора ответил на VoWiFi-туннель и *отклонил
+  аутентификацию*: услуга на номере не подключена.
+
+И то, и другое — повод обратиться к оператору.
+
+## Переопределения
+
+Необязательны и нужны только для частностей: нестандартный IMS-APN, дополнительные ключи
+конфига или принудительное включение оператора, которого автоопределение пропустило. Правятся в
+WebUI либо руками в `/data/adb/modules/imsforge/carriers.json` — см.
+[carriers.example.json](carriers.example.json).
+
+```json
+{
+  "carriers": [
+    {
+      "canonical_name": "25001",
+      "ims_apn_name": "MTS IMS",
+      "int_arrays": { "carrier_nr_availabilities_int_array": [1, 2] }
+    }
+  ]
+}
 ```
 
-`dist/imsforge.zip` — обычный zip модуля, его можно поставить и вручную из менеджера
-KernelSU/Magisk вместо `imsforge install`.
+`canonical_name` — идентификатор, которым Google оперирует внутри CarrierSettings; у безымянного
+оператора это просто MCCMNC. WebUI показывает правильное имя для каждой вставленной симки, а
+`imsforge detect` печатает его в JSON. Остальные ключи: `ims_apn_value`, `ims_apn: false`,
+`bools`, `int_arrays`, плюс `auto: false` и `skip: ["имя"]` на верхнем уровне.
 
-Есть ещё `uv run imsforge apply` — применяет пропатченный конфиг сразу, без перезагрузки
-(временный bind-mount + сброс кэша + рестарт телефонии; связь пропадает на несколько секунд).
-Удобно при отладке и как запасной путь, если бэкенд монтирования когда-нибудь отвалится.
-
-## Настройка операторов
-
-Список живёт в `carriers.toml`. Обязательное поле одно — canonical-имя оператора, тот самый
-идентификатор, которым Google оперирует внутри CarrierSettings:
-
-```toml
-[[carrier]]
-canonical_name = "25001"      # безымянный оператор: canonical-имя это просто MCCMNC
-ims_apn_name = "MTS IMS"
-
-[carrier.int_arrays]
-carrier_nr_availabilities_int_array = [1, 2]   # 1 = NSA, 2 = SA, то есть ещё и 5G SA
-```
-
-`imsforge carriers` выведет правильное имя для тех симок, что сейчас в телефоне, включая МВНО
-с матчингом по SPN/IMSI/GID1, и заодно готовый блок для копирования. Необязательные ключи
-(`vowifi`, `ims_apn`, `ims_apn_value`, `[carrier.bools]`) описаны комментариями прямо в файле.
-
-Набор ключей повторяет то, что выставляет PixelIMS, минус
-`carrier_supports_ss_over_ut_bool` — он ломает переадресацию, если у оператора не работает
-XCAP.
+Набор ключей повторяет то, что выставляет PixelIMS, минус `carrier_supports_ss_over_ut_bool` —
+он ломает переадресацию, если у оператора не работает XCAP.
 
 ## Как это устроено
 
-1. `pull` снимает `others.pb`, все `<canonical_name>.pb` и отпечаток сборки в `stock/`.
-2. `build` разбирает их по схемам из AOSP, заполняет блок `configs`, добавляет IMS-APN,
-   инкрементирует поля версии (чтобы пропатченный конфиг было видно в
-   `dumpsys carrier_config` как `carrier_config_version_string`) и собирает zip модуля.
-3. На загрузке бэкенд монтирования кладёт пропатченные файлы поверх
-   `/product/etc/CarrierSettings/`, а `post-fs-data.sh` модуля удаляет кэш carrier config.
-   Это удаление обязательно: телефония инвалидирует кэш по *версии APK конфиг-приложения*, а
-   не по версии protobuf-данных, поэтому иначе пропатченные файлы просто не будут прочитаны.
-   Скрипт выполняется до старта `system_server`, так что телефония поднимается уже на новом
-   конфиге.
+При каждой загрузке `post-fs-data.sh` запускает патчер **до того, как бэкенд монтирования
+положит файлы модуля поверх системных**. Оба root-решения этот порядок документируют — Magisk:
+*«Scripts run before any modules are mounted. This allows a module developer to dynamically
+adjust their modules before it gets mounted.»* Значит в этот момент в `/product` лежат
+оригиналы Google, и патч выводится из того, что приехало именно этой загрузкой. Поэтому
+обновление системы в принципе не может оставить устаревший снимок.
 
-## Проверка и диагностика
+Дальше патчер:
 
-`imsforge verify` проходит всю цепочку и показывает, где она рвётся:
+1. определяет вставленные симки и резолвит их в canonical-имена через `carrier_list.pb`, МВНО —
+   по SPN;
+2. пропускает операторов, у которых в стоке уже стоит `carrier_volte_available_bool = true`;
+3. заполняет блок `configs`, добавляет IMS-APN, инкрементирует версию (чтобы результат было
+   видно как `carrier_config_version_string` в `dumpsys carrier_config`);
+4. пишет в собственный каталог модуля и переставляет файлам контекст `system_file` — файлы,
+   созданные в `/data/adb`, наследуют метку, с которой конфиг-приложение их не прочитает;
+5. удаляет кэш carrier config. Это обязательно: телефония инвалидирует кэш по *версии APK
+   конфиг-приложения*, а не по версии protobuf-данных, поэтому иначе пропатченные файлы просто
+   не будут прочитаны.
 
-| Симптом | Что значит |
-|---|---|
-| `NO metamodule installed` | Нет бэкенда монтирования — модуль пустышка. См. «Требования». |
-| `others.pb: … (STOCK — not being shadowed)` | Бэкенд файлы не применил. |
-| Только `carrier_volte_available_bool: false` | Телефония на старом кэше; проверь, отработал ли `post-fs-data.sh` (`last-boot.log`). |
-| Нет IMS-PDN / `P-CSCF: NONE` | IMS-APN не подключился — сторона оператора либо неверное значение APN. |
+Копия стоковых исходников остаётся в `stock/` рядом с модулем вместе с отпечатком того, что было
+сгенерировано. При ручном запуске в `/product` лежит уже собственный вывод imsforge, а не файлы
+Google — читая его, проверка «сертифицирован ли оператор» приняла бы нашу же работу за гугловскую
+и всё пропустила. Отпечаток эти два случая различает, и тогда берётся кэш. Прогон, который ничего
+не изменил, считается чтением самого себя и кэш не обновляет.
 
-Два сценария патчем **не лечатся**, и их стоит различать, прежде чем заводить баг:
+Для правки protobuf взят [rust-protobuf](https://github.com/stepancheg/rust-protobuf) именно
+потому, что он сохраняет поля, которых нет в нашей схеме. Google может добавить поле в
+CarrierSettings в любой момент, а библиотека, которая неизвестные поля выбрасывает (prost,
+quick-protobuf), молча потеряла бы их для всех остальных операторов в файле.
 
-- **`mVopsSupport = 3`** в `dumpsys telephony.registry` означает, что сама сеть не предлагает
-  этой SIM голос по LTE (`2` — предлагает). Никакой carrier config это не переопределит.
-- **`IWLAN_IKEV2_AUTH_FAILURE`** в логе означает, что ePDG оператора ответил на твой
-  VoWiFi-туннель и *отклонил аутентификацию* — услуга на номере не подключена.
+## Сборка
 
-И то, и другое — повод обратиться к оператору, а не к патчу.
+Нужны Android NDK, `cargo-ndk` и таргет `aarch64-linux-android`:
 
-Про батарею: если «Звонки по Wi-Fi» включены для симки, у оператора которой ePDG не работает,
-Android будет бесконечно пересоздавать туннель примерно раз в 20 секунд. Выключи тумблер для
-этой симки в настройках или поставь ей `vowifi = false`.
+```bash
+rustup target add aarch64-linux-android
+cargo install cargo-ndk
+export ANDROID_NDK_HOME=~/Android/Sdk/ndk/<версия>
+./build.sh          # -> dist/imsforge.zip
+```
 
-## После обновления системы
-
-OTA перезаписывает `/product`, и модуль начнёт подменять свежие данные Google старым снимком.
-Пересобрать:
-
-1. отключить модуль в менеджере, перезагрузиться;
-2. `uv run imsforge pull` — снять новый сток;
-3. `uv run imsforge build && uv run imsforge install`, включить модуль, перезагрузиться.
-
-`customize.sh` сверяет стоковый `others.pb` со снимком, из которого собран модуль, и
-предупреждает при расхождении; `pull` ругается, если снимок делается при активном модуле —
-иначе в «сток» попадёт пропатченный файл.
+В zip нет данных операторов, поэтому одна сборка подходит любому устройству.
 
 ## Структура
 
 ```
-carriers.toml     операторы — единственный файл, который обычно нужно править
-proto/            схемы из AOSP (platform/tools/carrier_settings)
-stock/            снимок с устройства + stock.json с отпечатком сборки
-module/           шаблон модуля (module.prop, post-fs-data.sh, uninstall.sh)
-dist/             собранный модуль и zip
-src/imsforge/
-  protos.py       генерация биндингов на лету через grpcio-tools
-  patch.py        правка protobuf: ключи конфига, IMS APN, int-массивы
-  build.py        carriers / pull / build / install / apply / verify
+native/           патчер (Rust)
+proto/            схемы CarrierSettings из AOSP
+module/           шаблон модуля: скрипты, module.prop, webroot/
+build.sh          кросс-сборка и упаковка dist/imsforge.zip
 ```
 
 ## Ограничения
 
-- `.pb` привязаны к конкретной сборке Android, поэтому модуль собирается под устройство и
-  переустанавливается после OTA. `customize.sh` откажется ставиться на другое устройство.
+- Имеет смысл только там, где carrier config поставляет гугловский CarrierSettings — Pixel и
+  устройства с тем же приложением.
 - `vonr_enabled_bool` что-то даёт только там, где у оператора действительно есть 5G SA.
-- Проверено на Pixel 8 Pro (husky), Android 17, KernelSU Next и NoMount. Подход не завязан на
+- МВНО определяются по MCCMNC и SPN. Те, что различаются только префиксом IMSI или GID1,
+  свалятся в общую запись — если это не твой случай, добавь переопределение явно.
+- Проверено на Pixel 8 Pro (husky), Android 17, KernelSU Next с NoMount. Подход не завязан на
   конкретную модель, но проверялось именно на ней.
 
 ## Благодарности
 
-- [PixelIMS](https://github.com/kyujin-cho/pixel-volte-patch) — приложение, решающее ту же
-  задачу в рантайме, и источник набора ключей carrier config.
-- [carriersettings-extractor](https://github.com/GrapheneOS-Archive/carriersettings-extractor)
-  — подсказал, где лежат protobuf-схемы AOSP.
+- [PixelIMS](https://github.com/kyujin-cho/pixel-volte-patch) — решает ту же задачу в рантайме и
+  является источником набора ключей carrier config.
+- [carriersettings-extractor](https://github.com/GrapheneOS-Archive/carriersettings-extractor) —
+  подсказал, где лежат protobuf-схемы AOSP.
 - [AOSP platform/tools/carrier_settings](https://android.googlesource.com/platform/tools/carrier_settings/)
   — сами схемы.
 - [NoMount](https://github.com/maxsteeel/nomount),

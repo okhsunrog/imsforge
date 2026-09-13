@@ -1,6 +1,6 @@
 id=imsforge
 name=imsforge (CarrierSettings IMS patch)
-version=v1.0.0
-versionCode=1
+version=v2.0.0
+versionCode=2
 author=okhsunrog
-description=Enables VoLTE / VoWiFi / VoNR for carriers Google never certified, by replacing the CarrierSettings protobufs. Requires a mount metamodule (NoMount, Mountify, meta-overlayfs).
+description=Enables VoLTE / VoWiFi / VoNR for carriers Google never certified. Patches the CarrierSettings protobufs on the device at every boot, so it survives OS updates and needs no per-device build. Requires a mount backend (KernelSU: NoMount, Mountify or meta-overlayfs; Magisk has one built in).

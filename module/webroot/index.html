@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>imsforge</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="title">
+    <h1>imsforge</h1>
+    <span class="version" id="version"></span>
+  </div>
+  <button class="icon" id="refresh" title="Refresh" aria-label="Refresh">↻</button>
+</header>
+
+<main>
+
+  <div class="banner" id="banner" hidden>
+    <span id="banner-text"></span>
+    <button class="small" id="banner-action"></button>
+  </div>
+
+  <section class="card">
+    <h2>Status</h2>
+    <div class="rows" id="status-rows">
+      <div class="skeleton"></div>
+    </div>
+    <details id="log-details">
+      <summary>Last boot log</summary>
+      <pre id="log">—</pre>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>SIM cards</h2>
+    <p class="hint">
+      Carriers are detected automatically. Ones Google already certified are left alone — their
+      config is curated, and overwriting it can break working VoLTE.
+    </p>
+    <div id="sims"><div class="skeleton"></div></div>
+  </section>
+
+  <section class="card">
+    <h2>IMS</h2>
+    <div class="rows" id="ims-rows"><div class="skeleton"></div></div>
+    <p class="hint" id="ims-hint" hidden></p>
+  </section>
+
+  <section class="card">
+    <h2>Overrides</h2>
+    <p class="hint">
+      Only needed for extras: a non-standard IMS APN, additional config keys, or forcing a
+      carrier that detection skipped.
+    </p>
+    <div id="carriers"></div>
+    <details id="raw-details">
+      <summary>Edit raw JSON</summary>
+      <textarea id="raw" spellcheck="false" rows="12"></textarea>
+      <div class="row-actions">
+        <span class="error" id="raw-error"></span>
+        <button class="small" id="raw-format">Format</button>
+      </div>
+    </details>
+  </section>
+
+</main>
+
+<footer>
+  <button class="ghost" id="reboot">Reboot</button>
+  <button class="primary" id="save">Save</button>
+</footer>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

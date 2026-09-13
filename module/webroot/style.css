@@ -1,0 +1,255 @@
+/* No external resources: the WebView runs offline, from inside the module. */
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --fg: #14161a;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --accent: #2563eb;
+  --ok: #15803d;
+  --ok-bg: #dcfce7;
+  --warn: #b45309;
+  --warn-bg: #fef3c7;
+  --bad: #b91c1c;
+  --bad-bg: #fee2e2;
+  --radius: 14px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --fg: #e8eaed;
+    --muted: #9aa0aa;
+    --line: #262b34;
+    --accent: #60a5fa;
+    --ok: #4ade80;
+    --ok-bg: #14321f;
+    --warn: #fbbf24;
+    --warn-bg: #3a2d0c;
+    --bad: #f87171;
+    --bad-bg: #3b1618;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 0 96px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: max(14px, env(safe-area-inset-top)) 16px 14px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+
+.title { display: flex; align-items: baseline; gap: 8px; }
+h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -0.02em; }
+.version { color: var(--muted); font-size: 12px; }
+
+main { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.hint { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+
+.rows { display: flex; flex-direction: column; gap: 10px; }
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 26px;
+}
+.row .label { color: var(--muted); font-size: 14px; }
+.row .value { font-size: 14px; text-align: right; word-break: break-word; }
+.row .value.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.pill.ok { color: var(--ok); background: var(--ok-bg); }
+.pill.warn { color: var(--warn); background: var(--warn-bg); }
+.pill.bad { color: var(--bad); background: var(--bad-bg); }
+.pill.idle { color: var(--muted); background: var(--line); }
+
+.sim {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.sim:last-child { margin-bottom: 0; }
+.sim-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.sim-name { font-weight: 600; }
+.sim-meta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.sim-actions { margin-top: 10px; }
+
+.carrier {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.carrier .grow { flex: 1; min-width: 0; }
+.carrier .cname { font-weight: 600; font-size: 14px; }
+.carrier input {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+}
+.carrier .extra { margin-top: 4px; color: var(--muted); font-size: 12px; }
+
+button {
+  font: inherit;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+button:active { opacity: 0.6; }
+button.primary { background: var(--accent); color: #fff; font-weight: 600; }
+button.ghost { background: transparent; border-color: var(--line); color: var(--fg); }
+button.small { padding: 6px 12px; font-size: 13px; background: transparent; border-color: var(--line); color: var(--fg); }
+button.danger { color: var(--bad); border-color: var(--line); background: transparent; }
+button.icon {
+  background: transparent;
+  border-color: var(--line);
+  font-size: 17px;
+  padding: 6px 12px;
+  color: var(--fg);
+}
+
+footer {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  display: flex;
+  gap: 10px;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid var(--line);
+}
+footer button { flex: 1; }
+
+/* The hidden attribute must win over display:flex, otherwise an empty banner shows up. */
+.banner[hidden] { display: none; }
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 14px;
+  font-weight: 550;
+}
+
+details { margin-top: 12px; }
+summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 6px 0;
+}
+pre {
+  margin: 8px 0 0;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow-x: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+textarea {
+  width: 100%;
+  margin-top: 8px;
+  padding: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+  resize: vertical;
+}
+.row-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
+.error { color: var(--bad); font-size: 12px; }
+
+.skeleton {
+  height: 48px;
+  border-radius: 10px;
+  background: linear-gradient(90deg, var(--line) 25%, var(--card) 50%, var(--line) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s infinite;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 13px;
+  font-weight: 550;
+  z-index: 10;
+}
