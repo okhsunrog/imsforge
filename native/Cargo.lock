@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "imsforge"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "clap",
  "protobuf",
