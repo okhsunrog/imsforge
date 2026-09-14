@@ -74,7 +74,9 @@ Both mean "ask your carrier".
 
 Optional, and only for extras: a non-standard IMS APN, additional config keys, or forcing a
 carrier that detection skipped. Edit them in the WebUI, or write
-`/data/adb/modules/imsforge/carriers.json` yourself — see [carriers.example.json](carriers.example.json).
+`/data/adb/imsforge/carriers.json` yourself — see [carriers.example.json](carriers.example.json).
+The file lives outside the module directory so that updating the module does not take your
+settings with it.
 
 ```json
 {

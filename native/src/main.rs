@@ -145,6 +145,22 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Why a carrier ends up in the patch list, or why it does not. Pulled out of the I/O so the
+/// rule that protects a carrier Google already supports can be tested on its own.
+fn decide(name: &str, cfg: &Config, certified: bool) -> Option<&'static str> {
+    if cfg.skip.iter().any(|s| s == name) {
+        return None;
+    }
+    if cfg.carriers.iter().any(|c| c.canonical_name == name) {
+        // An explicit entry is a deliberate request and outranks the safety check.
+        return Some("configured");
+    }
+    if !cfg.auto || certified {
+        return None;
+    }
+    Some("detected")
+}
+
 struct Target {
     carrier: Carrier,
     reason: &'static str,
@@ -248,7 +264,7 @@ fn targets(
     let others = patch::parse_others(&others_bytes).map_err(|e| format!("others.pb: {e}"))?;
 
     for (name, _) in resolved.clone() {
-        if cfg.skip.contains(&name) || targets.iter().any(|t| t.carrier.canonical_name == name) {
+        if targets.iter().any(|t| t.carrier.canonical_name == name) {
             continue;
         }
 
@@ -267,15 +283,17 @@ fn targets(
             }
         };
 
-        if enabled {
-            println!("  {name}: VoLTE already enabled by Google, leaving alone");
-            continue;
+        match decide(&name, cfg, enabled) {
+            Some(reason) => targets.push(Target {
+                carrier: Carrier::new(name),
+                reason,
+                label: String::new(),
+            }),
+            None if enabled => {
+                println!("  {name}: VoLTE already enabled by Google, leaving alone")
+            }
+            None => {}
         }
-        targets.push(Target {
-            carrier: Carrier::new(name),
-            reason: "detected",
-            label: String::new(),
-        });
     }
     name_apns(&mut targets, &resolved);
     Ok((targets, candidates))
@@ -291,14 +309,16 @@ fn cmd_detect(paths: &Paths, save: bool) -> Result<(), String> {
         if let Some(n) = &name {
             lines.push(format!("{n}\t{}", sim.spn));
         }
-        items.push(format!(
-            r#"{{"mccmnc":"{}","spn":"{}","canonical_name":{}}}"#,
-            sim.mccmnc,
-            sim.spn.replace('"', "'"),
-            name.map(|n| format!("\"{n}\"")).unwrap_or("null".into())
-        ));
+        items.push(serde_json::json!({
+            "mccmnc": sim.mccmnc,
+            "spn": sim.spn,
+            "canonical_name": name,
+        }));
     }
-    println!(r#"{{"auto":{},"sims":[{}]}}"#, cfg.auto, items.join(","));
+    // Serialised properly rather than by hand: an operator name carrying a quote or a backslash
+    // would otherwise produce JSON the WebUI cannot parse, and it would show "no SIM detected".
+    let report = serde_json::json!({ "auto": cfg.auto, "sims": items });
+    println!("{report}");
 
     // Persist the mapping for the next boot, when the modem will not be up in time.
     if save && !lines.is_empty() {
@@ -420,5 +440,68 @@ mod tests {
     fn the_fingerprint_tells_our_output_apart() {
         assert_eq!(fingerprint(b"a"), fingerprint(b"a"));
         assert_ne!(fingerprint(b"a"), fingerprint(b"b"));
+    }
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::*;
+
+    fn cfg(json: &str) -> Config {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn a_carrier_google_supports_is_left_alone() {
+        let c = cfg("{}");
+        assert_eq!(decide("25001", &c, false), Some("detected"));
+        assert_eq!(decide("25001", &c, true), None);
+    }
+
+    #[test]
+    fn an_explicit_entry_outranks_the_safety_check() {
+        // Asking for a carrier by name is a deliberate act; the guard exists to stop detection
+        // from touching a curated config, not to overrule the user.
+        let c = cfg(r#"{"carriers":[{"canonical_name":"25001"}]}"#);
+        assert_eq!(decide("25001", &c, true), Some("configured"));
+    }
+
+    #[test]
+    fn skip_beats_everything() {
+        let c = cfg(r#"{"carriers":[{"canonical_name":"x"}],"skip":["x"]}"#);
+        assert_eq!(decide("x", &c, false), None);
+    }
+
+    #[test]
+    fn auto_off_leaves_detection_out_of_it() {
+        let c = cfg(r#"{"auto":false}"#);
+        assert_eq!(decide("25001", &c, false), None);
+
+        let explicit = cfg(r#"{"auto":false,"carriers":[{"canonical_name":"25001"}]}"#);
+        assert_eq!(decide("25001", &explicit, false), Some("configured"));
+    }
+
+    #[test]
+    fn the_cache_is_used_when_the_live_file_is_our_own_output() {
+        let dir = std::env::temp_dir().join(format!("imsforge-src-{}", std::process::id()));
+        let cache = std::env::temp_dir().join(format!("imsforge-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(dir.join("others.pb"), b"patched").unwrap();
+        std::fs::write(cache.join("others.pb"), b"stock").unwrap();
+
+        // No fingerprint yet: the live file is taken at face value.
+        assert_eq!(effective_src(&dir, &cache), dir);
+
+        // Once it matches what we produced, reading it would mean reading ourselves.
+        std::fs::write(
+            cache.join("output.fingerprint"),
+            fingerprint(b"patched").to_string(),
+        )
+        .unwrap();
+        assert_eq!(effective_src(&dir, &cache), cache);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&cache).ok();
     }
 }

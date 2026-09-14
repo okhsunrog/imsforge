@@ -61,6 +61,8 @@ const state = {
   config: { auto: true, carriers: [], skip: [] },
   sims: [],
   patchedLastBoot: [],   // canonical names imsforge actually wrote on this boot
+  certified: [],         // carriers the patcher deliberately left to Google
+  booted: false,         // is there a boot log to reason from at all
   ims: {},               // slot index -> { registered }
   reason: null,          // carrier-side explanation when IMS is down
 };
@@ -89,7 +91,7 @@ echo "@@detect"; ${MODDIR}/bin/imsforge detect 2>/dev/null
 echo "@@log"; cat ${MODDIR}/last-boot.log 2>/dev/null
 echo "@@meta"; ls -d /data/adb/metamodule 2>/dev/null || echo missing
 echo "@@impl"; [ -d /data/adb/ksu ] && echo ksu || echo other
-echo "@@md5"; md5sum /product/etc/CarrierSettings/others.pb ${MODDIR}/product/etc/CarrierSettings/others.pb 2>/dev/null | awk '{print $1}'
+echo "@@md5"; md5sum /product/etc/CarrierSettings/others.pb $(ls ${MODDIR}/product/etc/CarrierSettings/others.pb ${MODDIR}/system/product/etc/CarrierSettings/others.pb 2>/dev/null | head -1) 2>/dev/null | awk '{print $1}'
 echo "@@volte"; dumpsys carrier_config 2>/dev/null | grep -E '^[[:space:]]*carrier_volte_available_bool =' | sort -u
 echo "@@ims"; logcat -b radio -d -t 1000 2>/dev/null | grep isImsRegistered | tail -10
 `;
@@ -143,14 +145,18 @@ async function loadAll() {
     ...[...log.matchAll(/\[([^\]]+)\]:\s*\d+ keys/g)].map((m) => m[1]),
     ...[...log.matchAll(/^(\S+)\.pb:\s*\d+ keys/gm)].map((m) => m[1]),
   ];
+  // Only the patcher knows a carrier was left alone because Google already supports it; the
+  // interface must not guess that from the absence of a patch.
+  state.certified = [...log.matchAll(/^\s*(\S+): VoLTE already enabled by Google/gm)].map((m) => m[1]);
+  state.booted = log.length > 0;
   $('log').textContent = log || 'no log yet — reboot once';
 
   // isImsRegistered is logged per phone; phone index matches SIM slot order.
+  // The last line per phone wins. Or-ing them would keep reporting "registered" after IMS had
+  // dropped, simply because an older line in the buffer said so.
   state.ims = {};
   for (const m of (s.ims || '').matchAll(/Phone-(\d)\s*: isImsRegistered =(\w+)/g)) {
-    const slot = Number(m[1]);
-    state.ims[slot] = state.ims[slot] || { registered: false };
-    if (m[2] === 'true') state.ims[slot].registered = true;
+    state.ims[Number(m[1])] = { registered: m[2] === 'true' };
   }
   state.reason = null;
 
@@ -208,7 +214,13 @@ function carrierPlan(name) {
       what: state.patchedLastBoot.includes(name) ? 'Patched' : 'Will be patched on the next boot',
     };
   }
-  return { on: false, disabled: false, what: 'Google already enables VoLTE here — no patch needed' };
+  if (state.certified.includes(name)) {
+    return { on: false, disabled: false, what: 'Google already enables VoLTE here — no patch needed' };
+  }
+  if (!state.booted) {
+    return { on: false, disabled: false, what: 'Not patched yet — reboot to apply' };
+  }
+  return { on: false, disabled: false, what: 'Not patched' };
 }
 
 function renderSims() {
@@ -303,7 +315,12 @@ function toggleCarrier(name, on) {
   const pinned = state.config.carriers.some((c) => c.canonical_name === name);
 
   if (on) {
-    if (!pinned) state.config.carriers.push({ canonical_name: name });
+    // Turning a carrier on normally just lifts the skip and lets detection do its job. An
+    // explicit entry is only added when detection would pass the carrier over, because such an
+    // entry permanently bypasses the "Google already supports this" safety check.
+    if (!pinned && state.certified.includes(name)) {
+      state.config.carriers.push({ canonical_name: name });
+    }
   } else {
     state.config.carriers = state.config.carriers.filter((c) => c.canonical_name !== name);
     state.config.skip.push(name);

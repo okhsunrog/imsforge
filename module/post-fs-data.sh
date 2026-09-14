@@ -30,7 +30,14 @@ fi
     [ -f "$MODDIR/carriers.json" ] && [ ! -f "$DATADIR/carriers.json" ] &&
         mv "$MODDIR/carriers.json" "$DATADIR/carriers.json" && echo "  migrated carriers.json"
 
-    if "$MODDIR/bin/imsforge" patch --out "$OUT" --config "$DATADIR/carriers.json" \
+    # Patch into a staging directory and swap it in, rather than writing over what is already
+    # there. Nothing else would ever remove a file: turn a carrier off and last boot's patched
+    # copy would sit in place and keep being mounted, so the switch would appear to do nothing.
+    STAGE="$OUT.new"
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE"
+
+    if "$MODDIR/bin/imsforge" patch --out "$STAGE" --config "$DATADIR/carriers.json" \
         --cache "$DATADIR/stock"; then
         # Files created at runtime inherit adb_data_file from /data/adb. Mounted over /product
         # with that label, com.google.android.carrier cannot read them — so relabel to match a
@@ -39,11 +46,20 @@ fi
         # shellcheck disable=SC2012
         ctx=$(ls -Z /product/etc/CarrierSettings/carrier_list.pb 2>/dev/null | awk '{print $1}')
         if [ -n "$ctx" ]; then
-            chcon "$ctx" "$OUT"/*.pb 2>/dev/null && echo "  relabelled to $ctx"
+            chcon "$ctx" "$STAGE"/*.pb 2>/dev/null && echo "  relabelled to $ctx"
         fi
-        chmod 644 "$OUT"/*.pb 2>/dev/null
+        chmod 644 "$STAGE"/*.pb 2>/dev/null
+
+        rm -rf "$OUT"
+        if [ -n "$(ls -A "$STAGE" 2>/dev/null)" ]; then
+            mv "$STAGE" "$OUT"
+        else
+            rm -rf "$STAGE"
+            echo "  nothing to patch — /product is left as Google shipped it"
+        fi
     else
-        echo "  ! patching failed, leaving the system untouched"
+        rm -rf "$STAGE"
+        echo "  ! patching failed, keeping the previous output"
     fi
 
     # Telephony invalidates its carrier config cache by the *version of the config app's APK*,

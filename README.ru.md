@@ -78,7 +78,7 @@ CSFB на 2G/3G — что становится реальной проблем�
 
 Необязательны и нужны только для частностей: нестандартный IMS-APN, дополнительные ключи
 конфига или принудительное включение оператора, которого автоопределение пропустило. Правятся в
-WebUI либо руками в `/data/adb/modules/imsforge/carriers.json` — см.
+WebUI либо руками в `/data/adb/imsforge/carriers.json` — см.
 [carriers.example.json](carriers.example.json).
 
 ```json

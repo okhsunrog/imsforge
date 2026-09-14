@@ -191,3 +191,19 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod example_tests {
+    use super::*;
+
+    #[test]
+    fn the_shipped_example_actually_parses() {
+        // The README points users at carriers.example.json, and deny_unknown_fields means a
+        // stray key there makes the module refuse to patch anything at all.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../carriers.example.json");
+        let text = std::fs::read_to_string(&path).expect("example config is missing");
+        let cfg: Config = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("carriers.example.json does not parse: {e}"));
+        assert!(cfg.auto);
+    }
+}
