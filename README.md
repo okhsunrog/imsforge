@@ -53,8 +53,10 @@ config is curated and overwriting it can break working VoLTE.
 
 ## WebUI
 
-Open the module's WebUI from the manager (or from
-[KsuWebUI](https://github.com/a13e300/KsuWebUI)) to see, on the phone:
+Open the module's WebUI from the manager to see, on the phone. APatch implements the same
+WebUI interface as KernelSU, so it works there unchanged; Magisk has no built-in viewer, but
+[MMRL](https://github.com/MMRLApp/MMRL) and [KsuWebUI](https://github.com/a13e300/KsuWebUI)
+render it for any of them:
 
 - whether a mount backend is present and whether the patch actually reached `/product`;
 - what each SIM resolved to, and whether it was patched, skipped or unknown;

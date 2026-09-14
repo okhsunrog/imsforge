@@ -6,26 +6,48 @@
 # Both root implementations document this ordering. Magisk: "Scripts run before any modules are
 # mounted. This allows a module developer to dynamically adjust their modules before it gets
 # mounted." KernelSU Next runs module post-fs-data.sh, then the metamodule's mount script.
-MODDIR=${0%/*}
-LOG="$MODDIR/last-boot.log"
+LOG_NAME=last-boot.log
 PHONE_FILES=/data/user_de/0/com.android.phone/files
-# Settings and the stock cache live outside the module: updating a module replaces its whole
-# directory, which would discard the user's configuration on every upgrade.
-DATADIR=/data/adb/imsforge
 
-# Where the mount backend expects our files. KernelSU keeps partitions at the module root
-# (NoMount and friends scan $MODDIR/product); Magisk and APatch use the system/ prefix.
-if [ "$KSU" = "true" ] || [ -d /data/adb/ksu ]; then
-    OUT="$MODDIR/product/etc/CarrierSettings"
-else
-    OUT="$MODDIR/system/product/etc/CarrierSettings"
+# Where the mount backend expects our files, worked out by observation rather than by guessing
+# from which root implementation is installed.
+#
+# The zip ships a marker at system/product/etc/CarrierSettings/.keep, and each manager files it
+# where it wants module content: KernelSU relocates system/product to product, while Magisk and
+# APatch keep the system/ prefix. Whichever spelling the marker ends up in is the one to write to.
+#
+# The marker only survives until the first patch replaces that directory, so the answer is
+# remembered. The root-implementation check stays as a last resort for a module whose state was
+# wiped by hand.
+MODDIR=${0%/*}
+DATADIR=/data/adb/imsforge
+mkdir -p "$DATADIR"
+
+OUT=""
+for d in "$MODDIR/product/etc/CarrierSettings" "$MODDIR/system/product/etc/CarrierSettings"; do
+    if [ -e "$d/.keep" ]; then
+        OUT="$d"
+        echo "$OUT" > "$DATADIR/layout"
+        break
+    fi
+done
+
+if [ -z "$OUT" ] && [ -f "$DATADIR/layout" ]; then
+    OUT=$(cat "$DATADIR/layout")
+fi
+
+if [ -z "$OUT" ]; then
+    if [ "$KSU" = "true" ] || [ -d /data/adb/ksu ]; then
+        OUT="$MODDIR/product/etc/CarrierSettings"
+    else
+        OUT="$MODDIR/system/product/etc/CarrierSettings"
+    fi
 fi
 
 {
     echo "[$(date)] post-fs-data"
     echo "  output: $OUT"
 
-    mkdir -p "$DATADIR"
     # Migrate a config left in the module directory by an older version.
     [ -f "$MODDIR/carriers.json" ] && [ ! -f "$DATADIR/carriers.json" ] &&
         mv "$MODDIR/carriers.json" "$DATADIR/carriers.json" && echo "  migrated carriers.json"
@@ -70,4 +92,4 @@ fi
         rm -f "$f" && echo "  cache: removed $(basename "$f")" && found=$((found + 1))
     done
     [ "$found" -eq 0 ] && echo "  cache: already empty"
-} > "$LOG" 2>&1
+} > "$MODDIR/$LOG_NAME" 2>&1

@@ -28,6 +28,10 @@ install -m 755 "native/target/$TARGET/release/imsforge" "$STAGE/bin/imsforge"
 install -m 755 module/post-fs-data.sh module/service.sh module/action.sh \
     module/customize.sh module/uninstall.sh "$STAGE/"
 install -m 644 module/module.prop "$STAGE/"
+# A marker the manager will file wherever it keeps module content, so the module can see at boot
+# which layout it got rather than guess from the root implementation.
+mkdir -p "$STAGE/system/product/etc/CarrierSettings"
+: > "$STAGE/system/product/etc/CarrierSettings/.keep"
 mkdir -p "$STAGE/webroot"
 install -m 644 module/webroot/* "$STAGE/webroot/"
 
