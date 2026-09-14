@@ -71,9 +71,13 @@ After installing the fixed ZIP through `ksud` and rebooting:
   MmTel capabilities, with IMS disabled by its platform configuration.
 
 This establishes successful installed-module boot, effective configuration and
-MTS IMS registration over Wi-Fi. A real call, LTE-only registration/call and VoNR
-remain separate acceptance checks; no call was placed by this verification.
-No profiles, ZeroMount UID exclusions or radio settings were changed.
+MTS IMS registration over Wi-Fi. No profiles, ZeroMount UID exclusions or radio
+settings were changed during the automated checks.
+
+The user subsequently confirmed successful real MTS calls over both VoWiFi and
+VoLTE, following the requested Wi-Fi-on and Wi-Fi-off checks. This completes the
+manual voice-call acceptance checks for this device and carrier. VoNR remains
+untested.
 
 ## Compatibility and storage
 
