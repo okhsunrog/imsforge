@@ -339,20 +339,32 @@ function renderStatus(s) {
   addRow(rows, 'Mount backend',
     hasMeta ? pill('ok', 'present') : (isKsu ? pill('bad', 'missing') : pill('idle', 'built in')));
 
-  // The patcher answers this itself: it left behind the fingerprint of what it wrote, so it can
-  // tell our output from Google's original in whatever /product shows now.
+  const volte = /carrier_volte_available_bool = true/.test(s.volte || '');
+  // Did this boot write a patch at all? state.live answers a narrower question — whether the
+  // file THIS process reads at /product is ours — and a root shell or an app confined to its own
+  // mount namespace can be told our file is not there while the patch was applied all the same.
+  const applied = state.booted && state.patchedLastBoot.length > 0;
+
   addRow(rows, 'Patch active on this boot',
     state.live ? pill('ok', 'yes')
       : state.nothingToPatch ? pill('idle', 'nothing to patch')
-        : pill('bad', 'no'));
+        // Written this boot, but not the file we are reading here: normal when the mount backend
+        // hands the module's files to some apps and not to this viewer. Only a fault if telephony
+        // — the one process that must see it — did not either, and that is the row below.
+        : applied ? pill('idle', 'applied on boot')
+          : pill('bad', 'no'));
 
-  const volte = /carrier_volte_available_bool = true/.test(s.volte || '');
   addRow(rows, 'Telephony sees VoLTE enabled', volte ? pill('ok', 'yes') : pill('bad', 'no'));
 
   if (!hasMeta && isKsu) {
     showBanner('No mount backend installed — nothing this module writes can reach the system.', '', null);
-  } else if (!state.live && !state.nothingToPatch) {
-    showBanner('The patch is not active. Reboot to apply it.', 'Reboot', reboot);
+  } else if (!state.booted) {
+    // No record of a run: a fresh install before its first reboot.
+    showBanner('Not applied yet. Reboot to apply the patch.', 'Reboot', reboot);
+  } else if (applied && !state.live && !volte) {
+    // The patch was written, this viewer does not see it, and neither does telephony — so it is
+    // not just a namespace the viewer is outside of; the backend is not delivering the files.
+    showBanner('The patch was applied on boot but the system is not reading it. Reboot to reapply.', 'Reboot', reboot);
   }
 }
 
