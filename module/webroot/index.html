@@ -7,56 +7,39 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-
 <header>
-  <div class="title">
-    <h1>imsforge</h1>
-    <span class="version" id="version"></span>
-  </div>
-  <button class="icon" id="refresh" title="Refresh" aria-label="Refresh">↻</button>
+  <div class="title"><h1>imsforge</h1><span class="version" id="version"></span></div>
+  <button class="icon" id="refresh" aria-label="Refresh status">↻</button>
 </header>
-
 <main>
-
-  <div class="banner" id="banner" hidden>
-    <span id="banner-text"></span>
-    <button class="small" id="banner-action"></button>
-  </div>
-
-  <section class="card">
-    <h2>Your SIM cards</h2>
-    <div id="sims"><div class="skeleton"></div></div>
+  <section class="health idle" id="health" aria-live="polite">
+    <span class="health-symbol" id="health-symbol" aria-hidden="true">…</span>
+    <div><h2 id="health-title">Checking module</h2><p id="health-note">Reading the current boot and saved settings.</p></div>
   </section>
-
-  <section class="card">
-    <h2>Module</h2>
-    <div class="rows" id="status-rows"><div class="skeleton"></div></div>
+  <div class="banner" id="banner" hidden role="status"><span id="banner-text"></span><button class="small" id="banner-action"></button></div>
+  <section aria-labelledby="sims-title"><h2 class="section-title" id="sims-title">Your SIM cards</h2><div class="sim-list" id="sims"><p class="hint">Reading SIM cards…</p></div></section>
+  <details class="module-details" id="module-details">
+    <summary><span id="module-summary">Module diagnostics</span></summary>
+    <div class="rows" id="status-rows"></div>
     <p class="hint" id="config-note" hidden></p>
     <p class="error" id="diagnostic-errors" hidden></p>
-    <details>
-      <summary>Last boot log</summary>
-      <pre id="log">—</pre>
-    </details>
-    <details id="raw-details">
-      <summary>Edit configuration as JSON</summary>
-      <textarea id="raw" spellcheck="false" rows="12"></textarea>
-      <div class="row-actions">
-        <span class="error" id="raw-error"></span>
-        <button class="small" id="discard">Discard changes</button>
-        <button class="small" id="raw-format">Format</button>
-      </div>
-    </details>
-  </section>
-
+    <p class="hint" id="checked-at"></p>
+    <details><summary>Last boot log</summary><pre id="log">—</pre></details>
+  </details>
+  <details class="advanced" id="raw-details">
+    <summary>Advanced configuration</summary>
+    <p class="hint">Edit automatic detection and per-carrier overrides as JSON. Changes apply after saving and restarting.</p>
+    <label class="sr-only" for="raw">Configuration JSON</label>
+    <textarea id="raw" spellcheck="false" rows="12" aria-describedby="raw-error"></textarea>
+    <div class="row-actions"><button class="small" id="raw-format">Format JSON</button></div>
+  </details>
+  <p class="error" id="raw-error" role="alert"></p>
 </main>
-
-<footer>
-  <button class="ghost" id="reboot">Reboot</button>
-  <button class="primary" id="save">Save</button>
+<footer id="action-bar" hidden>
+  <p id="action-note" aria-live="polite"></p>
+  <div class="footer-actions"><button class="ghost" id="discard">Discard</button><button class="primary" id="save">Save changes</button><button class="primary" id="reboot">Restart to apply</button></div>
 </footer>
-
-<div class="toast" id="toast" hidden></div>
-
+<div class="toast" id="toast" hidden role="status"></div>
 <script src="app.js"></script>
 </body>
 </html>

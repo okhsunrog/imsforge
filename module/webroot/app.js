@@ -62,7 +62,7 @@ function addRow(parent, label, value, cls = 'idle') {
 const state = {
   config: { auto: true, carriers: [], skip: [] },
   saved: null, sims: [], status: {}, observations: {}, meta: 'unknown',
-  ready: false, dirty: false, busy: false, loadId: 0, errors: [],
+  expanded: new Set(), ready: false, dirty: false, busy: false, loadId: 0, errors: [],
 };
 
 // Preserve unknown keys so the Rust validator can reject them instead of silently dropping them.
@@ -97,12 +97,25 @@ function source(sections, name) {
   return sections[name] || '';
 }
 
+function needsRestart() {
+  const run = currentRun();
+  return state.ready && (state.status.config_changed === true || !run);
+}
+
 function controls() {
-  $('save').disabled = !state.ready || state.busy;
+  const pending = needsRestart();
+  $('save').disabled = !state.ready || state.busy || !state.dirty;
   $('reboot').disabled = !state.ready || state.busy || state.dirty;
   $('raw').disabled = !state.ready || state.busy;
   $('discard').disabled = state.busy || !state.dirty;
   $('refresh').disabled = state.busy;
+  $('raw-format').disabled = !state.ready || state.busy;
+  $('action-bar').hidden = !state.dirty && !pending;
+  $('save').hidden = !state.dirty;
+  $('discard').hidden = !state.dirty;
+  $('reboot').hidden = state.dirty || !pending;
+  $('action-note').textContent = state.dirty ? 'Changes are not saved' : 'Saved settings need a restart';
+  document.body.classList.toggle('has-actions', !$('action-bar').hidden);
 }
 
 async function loadAll(discard = false) {
@@ -133,9 +146,9 @@ async function loadAll(discard = false) {
     state.meta = 'unknown';
     try { state.meta = source(data, 'meta'); } catch (e) { state.errors.push(e.message); }
     state.observations = {};
-    for (const name of ['radio', 'carrier']) {
+    for (const name of ['radio', 'carrier', 'ims']) {
       try {
-        for (const match of source(data, name).matchAll(/^(pcscf|vops|volte) (\d+) (yes|no|true|false|\d+)$/gm)) {
+        for (const match of source(data, name).matchAll(/^(pcscf|vops|volte|ims|voice|last_transport) (\d+) (yes|no|true|false|wifi|cellular|\d+)$/gm)) {
           const slot = Number(match[2]);
           state.observations[slot] ||= {};
           state.observations[slot][match[1]] = match[3];
@@ -143,6 +156,7 @@ async function loadAll(discard = false) {
       } catch (e) { state.errors.push(e.message); }
     }
     if (!detected.complete) state.errors.push('SIM inventory is still settling; some slots may be missing.');
+    $('checked-at').textContent = `Last checked: ${new Date().toLocaleTimeString()}`;
     $('version').textContent = (data.version || '').match(/^version=(.*)$/m)?.[1] || '';
     $('log').textContent = data.log_ok === '0' ? data.log : 'Boot log unavailable.';
     state.ready = true;
@@ -150,6 +164,7 @@ async function loadAll(discard = false) {
     renderSims();
     renderStatus();
   } catch (error) {
+    setHealth('bad', 'Could not refresh', 'Previously read data may be out of date.');
     showBanner(`Could not refresh: ${error.message}. Saving is disabled until a successful refresh.`, 'Retry', () => loadAll(discard));
   } finally {
     state.busy = false;
@@ -164,21 +179,36 @@ function currentRun() {
 }
 
 function carrierPlan(name) {
-  if (!name) return { on: false, disabled: true, what: 'Unknown carrier — nothing to patch' };
+  if (!name) return { on: false, disabled: true, what: 'Unknown carrier — nothing to patch', tone: 'muted' };
   const sim = state.sims.find((item) => item.canonical_name === name);
   const explicit = state.config.carriers.some((carrier) => carrier.canonical_name === name);
   const on = !state.config.skip.includes(name) && (explicit || (state.config.auto && sim?.certified === false));
-  const patched = currentRun()?.phase === 'applied' && currentRun().carriers.some((c) => c.canonical_name === name && c.outcome === 'patched');
-  let what;
-  if (state.dirty) what = on ? 'Will be enabled when saved' : 'Will be disabled when saved';
-  else if (on) what = patched && state.status.config_changed === false ? 'Patch files installed on this boot' : 'Enabled in configuration — applies on reboot';
-  else if (!explicit && !state.config.skip.includes(name) && sim?.certified === true) what = 'Google enables VoLTE in the stock settings';
-  else if (state.config.auto && sim?.certified == null && !explicit && !state.config.skip.includes(name)) what = 'Stock settings unavailable — automatic decision unknown';
-  else what = patched ? 'Disabled in configuration — reboot to remove the patch' : 'Not selected for patching';
-  return { on, disabled: !state.ready || state.busy, what };
+  const run = currentRun();
+  const entry = run?.carriers?.find((c) => c.canonical_name === name);
+  const patched = run?.phase === 'applied' && entry?.outcome === 'patched';
+  let what, tone = 'muted';
+  if (state.dirty) what = on ? 'Selected after save and restart' : 'Excluded after save and restart';
+  else if (run?.phase === 'failed' && on) { what = 'Patch update failed'; tone = 'bad'; }
+  else if (entry?.outcome === 'missing' && on) { what = 'Carrier settings entry not found'; tone = 'warn'; }
+  else if (on) {
+    if (patched && state.status.config_changed === false) { what = '✓ Applied on this boot'; tone = 'good'; }
+    else { what = 'Enabled · restart to apply'; tone = 'warn'; }
+  } else if (!explicit && !state.config.skip.includes(name) && sim?.certified === true) what = 'Stock settings already enable VoLTE';
+  else if (state.config.auto && sim?.certified == null && !explicit && !state.config.skip.includes(name)) what = 'Stock settings unavailable · automatic decision unknown';
+  else what = patched ? 'Disabled · restart to remove patch' : 'Excluded from patching';
+  if (!state.ready) { what = 'Status may be out of date · refresh required'; tone = 'muted'; }
+  return { on, disabled: !state.ready || state.busy, what, tone };
+}
+
+function imsSummary(observed) {
+  if (observed.ims === '2') return { text: '✓ IMS registered', tone: 'good' };
+  if (observed.ims === '1') return { text: 'IMS registration in progress', tone: 'muted' };
+  if (observed.ims === '0') return { text: 'IMS not registered', tone: 'muted' };
+  return { text: 'IMS status unavailable', tone: 'muted' };
 }
 
 function renderSims() {
+  const focused = document.activeElement?.id;
   const box = $('sims');
   box.replaceChildren();
   if (!state.sims.length) { box.append(el('p', 'hint', state.ready ? 'No SIM reported.' : 'SIM inventory unavailable.')); return; }
@@ -186,25 +216,50 @@ function renderSims() {
     const plan = carrierPlan(sim.canonical_name);
     const card = el('div', 'sim');
     const head = el('div', 'sim-head');
-    const titles = el('div');
-    titles.append(el('div', 'sim-name', sim.spn || sim.mccmnc));
-    titles.append(el('div', 'sim-meta', `Slot ${sim.slot + 1} · ${sim.canonical_name || sim.mccmnc}`));
-    head.append(titles);
+    head.append(el('div', 'sim-name', sim.spn || sim.mccmnc || 'Unknown carrier'));
+    head.append(el('div', 'sim-meta', `SIM ${sim.slot + 1}`));
+    const control = el('div', 'sim-control');
+    const label = el('label', '', 'Apply patch');
     const button = el('button', `switch${plan.on ? ' on' : ''}`);
+    button.id = `patch-slot-${sim.slot}`;
+    label.setAttribute('for', button.id);
     button.setAttribute('role', 'switch');
+    button.setAttribute('aria-label', `Apply patch for ${sim.spn || sim.mccmnc}, SIM ${sim.slot + 1}`);
     button.setAttribute('aria-checked', String(plan.on));
     button.disabled = plan.disabled;
     button.onclick = () => toggleCarrier(sim.canonical_name, !plan.on);
     button.append(el('span', 'knob'));
-    head.append(button);
-    card.append(head, el('div', 'sim-state', plan.what));
-    const observed = state.observations[sim.slot] || {};
-    card.append(el('div', 'sim-ims muted', observed.volte === undefined ? 'Reported VoLTE flag: unavailable' : `Reported VoLTE flag: ${observed.volte === 'true' ? 'enabled' : 'disabled'}`));
-    const pcscf = observed.pcscf === 'yes' ? 'P-CSCF address observed' : observed.pcscf === 'no' ? 'No P-CSCF address observed' : 'P-CSCF observation unavailable';
-    card.append(el('div', 'sim-ims muted', `${pcscf}. IMS registration is not verified by this check.`));
-    if (observed.vops === '3') card.append(el('div', 'sim-ims warn', 'The current mobile network reports VoPS unsupported. Wi-Fi calling is a separate service.'));
+    control.append(label, button);
+    card.append(head, control, el('div', `sim-state ${plan.tone}`, plan.what));
+    const observed = state.ready ? state.observations[sim.slot] || {} : {};
+    const ims = imsSummary(observed);
+    // A deliberately excluded SIM should not look like a module failure.
+    if (plan.on || observed.ims === '2') card.append(el('div', `sim-ims ${ims.tone}`, ims.text));
+    const detail = el('details');
+    const detailKey = `sim-${sim.slot}`;
+    detail.open = state.expanded.has(detailKey);
+    detail.ontoggle = () => detail.open ? state.expanded.add(detailKey) : state.expanded.delete(detailKey);
+    detail.append(el('summary', '', 'Connection details'));
+    const rows = el('div', 'rows');
+    addRow(rows, 'IMS registration', ims.text.replace('✓ ', ''), observed.ims === '2' ? 'ok' : 'idle');
+    addRow(rows, 'Voice capability', observed.voice === 'true' ? 'available' : observed.voice === 'false' ? 'unavailable' : 'not reported', observed.ims === '2' && observed.voice === 'true' ? 'ok' : 'idle');
+    addRow(rows, 'Last registration transport', observed.ims === '2' && observed.last_transport ? (observed.last_transport === 'wifi' ? 'Wi-Fi' : 'cellular') : 'not reported');
+    addRow(rows, 'Android VoLTE setting', observed.volte === 'true' ? 'enabled' : observed.volte === 'false' ? 'disabled' : 'not reported', observed.volte === 'true' ? 'ok' : 'idle');
+    addRow(rows, 'P-CSCF address', observed.pcscf === 'yes' ? 'observed' : observed.pcscf === 'no' ? 'not observed' : 'not reported');
+    addRow(rows, 'Carrier ID', sim.canonical_name || sim.mccmnc || 'unknown');
+    detail.append(rows, el('p', 'hint', 'Registration and voice capability do not verify a completed call. Last registration transport is a historical observation, not the current radio technology.'));
+    if (observed.vops === '3') detail.append(el('p', 'hint', 'The mobile network reports VoPS unsupported. Wi-Fi calling is independent.'));
+    card.append(detail);
     box.append(card);
   }
+  if (focused?.startsWith('patch-slot-')) document.getElementById(focused)?.focus();
+}
+
+function setHealth(tone, title, note) {
+  $('health').className = `health ${tone}`;
+  $('health-title').textContent = title;
+  $('health-note').textContent = note;
+  $('health-symbol').textContent = tone === 'ok' ? '✓' : tone === 'bad' ? '!' : tone === 'warn' ? '↻' : '…';
 }
 
 function renderStatus() {
@@ -213,20 +268,31 @@ function renderStatus() {
   const run = currentRun();
   addRow(rows, 'Mount backend', state.meta, state.meta === 'missing' ? 'bad' : 'idle');
   const published = run?.phase === 'applied';
-  addRow(rows, 'Files installed this boot', published ? (run.files && Object.keys(run.files).length ? 'yes' : 'no patch needed') : run?.phase || 'not confirmed', published ? 'ok' : 'idle');
-  addRow(rows, 'Expected files visible here', published && Object.keys(run.files || {}).length ? (state.status.matches_run ? 'yes' : 'not observed') : 'not checked');
+  const hasFiles = Object.keys(run?.files || {}).length > 0;
+  addRow(rows, 'Files installed this boot', published ? (hasFiles ? 'yes' : 'no patch needed') : run?.phase || 'not confirmed', published ? 'ok' : run?.phase === 'failed' ? 'bad' : 'idle');
+  addRow(rows, 'Expected files visible here', published && hasFiles ? (state.status.matches_run ? 'yes' : 'not observed') : 'not checked', published && hasFiles && state.status.matches_run ? 'ok' : 'idle');
   const missing = (run?.carriers || []).filter((c) => c.outcome === 'missing').map((c) => c.canonical_name);
   $('config-note').textContent = missing.length ? `No CarrierSettings entry for: ${missing.join(', ')}.` : '';
   $('config-note').hidden = !missing.length;
   $('banner').hidden = true;
-  if (state.dirty) markDirty();
-  else if (state.meta === 'missing') showBanner('No mount backend found. Install one before applying this module.');
-  else if (run?.phase === 'failed') showBanner(`The boot update failed: ${run.error || 'see the boot log'}. Check the log before rebooting.`);
-  else if (run?.phase === 'preparing') showBanner('The boot update did not record completion. Check the boot log.');
-  else if (state.status.config_changed === true || !published) showBanner('The saved configuration has not been confirmed on this boot. Reboot to apply it.', 'Reboot', reboot);
-  else if (!state.status.matches_run && Object.keys(run.files || {}).length) showBanner('Files were installed, but this viewer does not see them. Mount namespaces can differ; this does not establish what telephony reads.');
+  if (state.meta === 'missing') setHealth('bad', 'Mount backend missing', 'Install a mount backend to apply the patch.');
+  else if (run?.phase === 'failed') {
+    setHealth('bad', 'Patch update failed', 'Open module diagnostics for the boot error.');
+    showBanner(`The boot update failed: ${run.error || 'see the boot log'}. Check the log before rebooting.`);
+  } else if (run?.phase === 'preparing') setHealth('warn', 'Boot update incomplete', 'Check the boot log before restarting.');
+  else if (state.dirty) setHealth('warn', 'Unsaved changes', 'Save first. Changes apply after a restart.');
+  else if (needsRestart()) setHealth('warn', 'Restart to apply settings', 'Saved settings have not been applied on this boot.');
+  else if (!published) setHealth('idle', 'Boot status unavailable', 'Refresh or inspect module diagnostics.');
+  else if (missing.length) setHealth('warn', 'Some carriers could not be patched', 'Open module diagnostics for the missing entries.');
+  else if (hasFiles && !state.status.matches_run) {
+    setHealth('idle', 'Patch installed · visibility unconfirmed', 'This viewer does not see the expected files.');
+    showBanner('Mount namespaces can differ. This does not establish what telephony reads.');
+  } else setHealth('ok', hasFiles ? 'Patch applied' : 'No patch needed', 'Your saved settings are active.');
+  if (state.errors.length && $('banner').hidden) showBanner('Some diagnostics are unavailable. Open module diagnostics for details.');
+  $('module-summary').textContent = state.errors.length || missing.length || !published || state.meta === 'missing' ? 'Module diagnostics · attention needed' : 'Module diagnostics';
   $('diagnostic-errors').textContent = state.errors.join('\n');
   $('diagnostic-errors').hidden = !state.errors.length;
+  controls();
 }
 
 function syncRaw() {
@@ -234,10 +300,16 @@ function syncRaw() {
   $('raw-error').textContent = '';
 }
 
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));
+  return value;
+}
+
 function markDirty() {
-  state.dirty = true;
-  controls();
-  showBanner('Changes have not been saved.', 'Save', save);
+  try { state.dirty = JSON.stringify(stable(normalize(JSON.parse($('raw').value)))) !== JSON.stringify(stable(state.saved)); }
+  catch (_) { state.dirty = true; }
+  renderStatus();
 }
 
 function toggleCarrier(name, on) {
@@ -249,12 +321,12 @@ function toggleCarrier(name, on) {
       const sim = state.sims.find((item) => item.canonical_name === name);
       if ((!config.auto || sim?.certified !== false) && !config.carriers.some((c) => c.canonical_name === name)) config.carriers.push({ canonical_name: name });
     } else {
-      config.carriers = config.carriers.filter((c) => c.canonical_name !== name);
+      // Exclusion takes precedence; keep custom overrides for the next enable.
       config.skip.push(name);
     }
     state.config = config;
-    markDirty();
     syncRaw();
+    markDirty();
     renderSims();
   } catch (error) { $('raw-error').textContent = error.message; toast('Fix the JSON draft before changing a switch.'); }
 }
@@ -288,6 +360,7 @@ async function save() {
     if (error.validation) { markDirty(); toast('Configuration rejected — correct the draft and save again.'); }
     else {
       state.ready = false;
+      setHealth('bad', 'Save not confirmed', 'Refresh to check the saved configuration.');
       showBanner(`Save was not confirmed: ${error.message}`, 'Refresh', () => loadAll(true));
     }
   } finally { state.busy = false; controls(); renderSims(); }
@@ -298,6 +371,7 @@ async function reboot() {
   if (!state.ready || state.busy || state.dirty) { toast('Save or discard changes first.'); return; }
   state.busy = true;
   controls();
+  setHealth('idle', 'Restarting…', 'Wait for your phone to finish restarting.');
   showBanner('Rebooting…');
   const result = await exec('svc power reboot || reboot');
   if (result.errno !== 0) { state.busy = false; controls(); showBanner(result.stderr || 'Could not reboot.'); }

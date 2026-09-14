@@ -30,7 +30,7 @@ test('the shipped probe preserves errors from dumpsys instead of a successful em
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'imsforge-probe-'));
   try {
     fs.mkdirSync(path.join(dir,'bin'));
-    for (const file of ['probe.sh','probe-radio.awk','probe-carrier.awk']) fs.copyFileSync(path.join(root,'module',file),path.join(dir,file));
+    for (const file of ['probe.sh','probe-radio.awk','probe-carrier.awk','probe-ims.awk']) fs.copyFileSync(path.join(root,'module',file),path.join(dir,file));
     fs.writeFileSync(path.join(dir,'module.prop'),'version=v-test\n');
     fs.writeFileSync(path.join(dir,'bin/imsforge'),'#!/bin/sh\nprintf "{}\\n"\n',{mode:0o755});
     fs.writeFileSync(path.join(dir,'bin/dumpsys'),'#!/bin/sh\necho "permission denied" >&2\nexit 1\n',{mode:0o755});
@@ -38,6 +38,7 @@ test('the shipped probe preserves errors from dumpsys instead of a successful em
     assert.equal(result.status,0,result.stderr);
     assert.match(result.stdout, /@@radio_ok\n1\n@@radio_error\npermission denied/);
     assert.match(result.stdout, /@@carrier_ok\n1\n@@carrier_error\npermission denied/);
+    assert.match(result.stdout, /@@ims_ok\n1\n@@ims_error\npermission denied/);
     assert.equal(fs.readdirSync(dir).some(name=>name.startsWith('imsforge-probe.')),false);
   } finally { fs.rmSync(dir,{recursive:true,force:true}); }
 });

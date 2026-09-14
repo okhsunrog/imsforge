@@ -60,11 +60,17 @@ render it for any of them:
 
 - backend availability, completed file installation for the current boot, and what this viewer sees;
 - per-slot carrier detection and draft/saved patch selection;
-- per-slot reported VoLTE flags and P-CSCF observations, with explicit read errors;
+- current per-slot IMS registration and voice capability, with connection details on demand;
 - configuration editing, validation, saving and discarding a draft.
 
-A P-CSCF address is not proof of IMS registration or a working VoLTE call. Historical radio
-logs are not used as current state. Files can be visible to telephony but hidden from the WebUI
+A bottom action bar appears only for unsaved changes or a pending restart. Turning off a
+carrier preserves its custom overrides for the next enable. Confirmed results are green;
+an intentionally excluded SIM is neutral.
+
+IMS state comes from current scoped ImsPhone fields, not P-CSCF or historical registration
+messages. Unsupported dumps show unavailable status. The last registration transport is
+labelled as a historical observation; it does not establish the current RAT or a successful call.
+Files can be visible to telephony but hidden from the WebUI
 by UID policy, SUSFS process marks or mount namespaces.
 
 See [device debugging (Russian)](docs/debugging.md) for ADB, ZeroMount UID exclusions,

@@ -206,6 +206,20 @@ P-CSCF — адрес IMS SIP-прокси. Он не доказывает ре�
 делай отдельно: актуальная регистрация IMS, выбранная технология и реальный звонок
 на нужной SIM, с понятным состоянием Wi-Fi и мобильной сети.
 
+Начиная с 2.3.0, `probe-ims.awk` читает текущие поля из
+`dumpsys -t 8 activity service com.android.phone/.TelephonyDebugService`:
+`mImsMmTelRegistrationState` из секции ImsPhone и `mMmTelCapabilities` из
+ImsPhoneCallTracker, с привязкой к `mPhoneId` соответствующего ImsPhone.
+Значения регистрации: 0 — отсутствует, 1 — в процессе, 2 — зарегистрирован.
+Источник определения состояний — [Android RegistrationManager](https://android.googlesource.com/platform/frameworks/base/+/main/telephony/java/android/telephony/ims/RegistrationManager.java).
+Неподдерживаемый формат не превращается в отрицательный результат: WebUI показывает
+«IMS status unavailable». Регистрация и доступный голос отображаются независимо
+от выбора патча: выключение переключателя не разрегистрирует IMS немедленно.
+
+Поле `last_transport` берётся из последнего события в локальном журнале регистрации
+только при текущем состоянии 2. WebUI называет его «Last registration transport»;
+WWAN отображается как cellular, без попытки угадать LTE или NR.
+
 Для записи новой сессии логов запусти отдельную отслеживаемую фоновую задачу:
 
 ```sh

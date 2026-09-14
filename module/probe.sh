@@ -35,6 +35,11 @@ carrier() {
     awk -f "$MODDIR/probe-carrier.awk" "$TMP/carrier"
 }
 
+ims() {
+    dumpsys -t 8 activity service com.android.phone/.TelephonyDebugService > "$TMP/ims" || return 1
+    awk -f "$MODDIR/probe-ims.awk" "$TMP/ims"
+}
+
 capture version cat "$MODDIR/module.prop"
 capture config "$MODDIR/bin/imsforge" read-config --config "$DATADIR/carriers.json"
 capture detect "$MODDIR/bin/imsforge" detect
@@ -43,3 +48,4 @@ capture meta backend
 capture log cat "$MODDIR/last-boot.log"
 capture radio radio
 capture carrier carrier
+capture ims ims

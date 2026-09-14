@@ -17,7 +17,7 @@ function setup() {
       append(...items) { this.children.push(...items); }, replaceChildren() { this.children = []; }, setAttribute() {} };
   }
   const context = {
-    document: { getElementById(id) { assert.ok(ids.has(id), `missing HTML element ${id}`); if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); }, createElement: node },
+    document: { body: {classList: {toggle() {}}}, getElementById(id) { assert.ok(ids.has(id), `missing HTML element ${id}`); if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); }, createElement: node },
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
     btoa: s => Buffer.from(s, 'binary').toString('base64'), unescape, encodeURIComponent,
@@ -31,7 +31,7 @@ function setup() {
 
 function response(overrides = {}) {
   const entries = { config: '{}', detect: JSON.stringify({complete: true, sims: [{slot: 1, canonical_name: '25001', spn: 'MTS', certified: false}]}),
-    status: JSON.stringify({current_boot: false, run: null}), meta: 'present', radio: 'pcscf 1 yes', carrier: 'volte 1 true',
+    status: JSON.stringify({current_boot: false, run: null}), meta: 'present', radio: 'pcscf 1 yes', carrier: 'volte 1 true', ims: '',
     version: 'version=v2.2.1', log: 'log', ...overrides };
   return Object.entries(entries).map(([name, text]) => `@@${name}\n${text}\n@@${name}_ok\n0\n`).join('');
 }
@@ -106,15 +106,14 @@ test('VoLTE of another SIM and a previous boot do not confirm publication', asyn
   const env = await loaded({status:JSON.stringify({current_boot:false, matches_run:true, run:{format:2,phase:'applied',files:{'others.pb':1},carriers:[]}}), carrier:'volte 0 true'});
   assert.equal(env.run('currentRun()'), null);
   assert.equal(env.nodes.get('status-rows').children[1].children[1].children[0].textContent, 'not confirmed');
-  const card = env.nodes.get('sims').children[0];
-  assert.equal(card.children[2].textContent, 'Reported VoLTE flag: unavailable');
+  assert.equal(env.run("state.observations[1]?.volte"), undefined);
 });
 
 test('observations stay attached to sparse slot IDs and do not claim registration', async () => {
   const env = await loaded({radio:'pcscf 0 no\npcscf 1 yes',carrier:'volte 0 false\nvolte 1 true'});
-  const card = env.nodes.get('sims').children[0];
-  assert.match(card.children[2].textContent, /enabled/);
-  assert.match(card.children[3].textContent, /P-CSCF address observed.*not verified/);
+  assert.equal(env.run('state.observations[1].volte'), 'true');
+  assert.equal(env.run('state.observations[1].pcscf'), 'yes');
+  assert.equal(env.run('imsSummary(state.observations[1]).text'), 'IMS status unavailable');
 });
 
 test('a failed current boot remains an error even if another slot enables VoLTE', async () => {
@@ -162,4 +161,93 @@ test('semantic rejection preserves an editable draft without overwriting saved c
   assert.equal(env.run('state.ready'),true);
   assert.equal(env.run('state.saved.auto'),true);
   assert.equal(env.nodes.get('raw').disabled,false);
+});
+
+const appliedStatus = {current_boot:true,config_changed:false,matches_run:true,run:{format:2,phase:'applied',files:{'others.pb':1},carriers:[{canonical_name:'25001',outcome:'patched'}]}};
+
+test('footer only appears for drafts or a pending restart', async () => {
+  const env = await loaded({status:JSON.stringify(appliedStatus)});
+  assert.equal(env.nodes.get('action-bar').hidden,true);
+  assert.equal(env.nodes.get('save').disabled,true);
+  env.run("toggleCarrier('25001', false)");
+  assert.equal(env.nodes.get('action-bar').hidden,false);
+  assert.equal(env.nodes.get('reboot').hidden,true);
+  await env.nodes.get('discard').onclick();
+  assert.equal(env.nodes.get('action-bar').hidden,true);
+  env.run('state.status.config_changed=true;renderStatus()');
+  assert.equal(env.nodes.get('action-bar').hidden,false);
+  assert.equal(env.nodes.get('save').hidden,true);
+  assert.equal(env.nodes.get('reboot').hidden,false);
+});
+
+test('formatting or restoring the saved raw draft is not a pending change', async () => {
+  const env = await loaded({status:JSON.stringify(appliedStatus)});
+  env.nodes.get('raw').value='{"skip":[],"carriers":[],"auto":true}';
+  env.nodes.get('raw').oninput();
+  assert.equal(env.run('state.dirty'),false);
+  assert.equal(env.nodes.get('action-bar').hidden,true);
+});
+
+test('IMS registration requires current per-slot data and is independent of patch state', async () => {
+  const env = await loaded({status:JSON.stringify(appliedStatus),ims:'ims 0 0\nvoice 0 false\nims 1 2\nvoice 1 true\nlast_transport 1 wifi'});
+  assert.equal(env.run('imsSummary(state.observations[1]).tone'),'good');
+  assert.equal(env.run('imsSummary(state.observations[0]).text'),'IMS not registered');
+  env.run("toggleCarrier('25001',false)");
+  assert.equal(env.run('imsSummary(state.observations[1]).tone'),'good');
+});
+
+test('diagnostic failures do not hide the boot failure explanation', async () => {
+  const env = await loaded({status:JSON.stringify({...appliedStatus,run:{...appliedStatus.run,phase:'failed',error:'output denied'}})});
+  env.run("state.errors=['ims: unavailable'];renderStatus()");
+  assert.match(env.nodes.get('banner-text').textContent,/output denied/);
+});
+
+test('IMS parser scopes current fields and treats transport as history only', () => {
+  const input = `GsmCdmaPhone extends:
+ mPhoneId=0
+ImsPhone extends:
+ mPhoneId=0
+++++++++++++++++
+ImsPhoneCallTracker extends:
+ mMmTelCapabilities=MmTel Capabilities - [Voice: false SMS: false]
+++++++++++++++++
+ImsPhone:
+ mImsMmTelRegistrationState = 0
+ Registration Log:
+  2026-01-01 handleImsRegistered: onImsMmTelConnected imsTransportType=WLAN
+++++++++++++++++
+GsmCdmaPhone extends:
+ mPhoneId=2
+ImsPhone extends:
+ mPhoneId=2
+++++++++++++++++
+ImsPhoneCallTracker extends:
+ mMmTelCapabilities=MmTel Capabilities - [Voice: true SMS: true]
+++++++++++++++++
+ImsPhone:
+ mImsMmTelRegistrationState = 2
+ mImsMmTelEmergencyRegistrationState = 0
+ Registration Log:
+  2026-01-01 handleImsRegistered: onImsMmTelConnected imsTransportType=WLAN
+  2026-01-02 handleImsUnregistered: onImsMmTelDisconnected
+  2026-01-03 handleImsRegistered: onImsMmTelConnected imsTransportType=WWAN
+++++++++++++++++
+Unrelated:
+ mImsMmTelRegistrationState = 0
+ mMmTelCapabilities=MmTel Capabilities - [Voice: false]
+ 2026-01-04 handleImsRegistered: onImsMmTelConnected imsTransportType=WLAN
+`;
+  const result=spawnSync('awk',['-f',path.join(root,'module/probe-ims.awk')],{input,encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);
+  assert.equal(result.stdout,'ims 0 0\nvoice 0 false\nims 2 2\nvoice 2 true\nlast_transport 2 cellular\n');
+  const unsupported=spawnSync('awk',['-f',path.join(root,'module/probe-ims.awk')],{input:'No services match\n mImsRegistered=true\n',encoding:'utf8'});
+  assert.equal(unsupported.stdout,'');
+});
+
+test('disabling and re-enabling preserves custom carrier overrides', async () => {
+  const env=await loaded({config:JSON.stringify({auto:true,carriers:[{canonical_name:'25001',int_arrays:{carrier_nr_availabilities_int_array:[1,2]}}],skip:[]}),status:JSON.stringify(appliedStatus)});
+  env.run("toggleCarrier('25001',false);toggleCarrier('25001',true)");
+  assert.equal(env.run('state.config.carriers[0].int_arrays.carrier_nr_availabilities_int_array.join()'),'1,2');
+  assert.equal(env.run('state.dirty'),false);
+  assert.equal(env.nodes.get('action-bar').hidden,true);
 });
