@@ -32,6 +32,7 @@
     <h2>Module</h2>
     <div class="rows" id="status-rows"><div class="skeleton"></div></div>
     <p class="hint" id="config-note" hidden></p>
+    <p class="error" id="diagnostic-errors" hidden></p>
     <details>
       <summary>Last boot log</summary>
       <pre id="log">—</pre>
@@ -41,6 +42,7 @@
       <textarea id="raw" spellcheck="false" rows="12"></textarea>
       <div class="row-actions">
         <span class="error" id="raw-error"></span>
+        <button class="small" id="discard">Discard changes</button>
         <button class="small" id="raw-format">Format</button>
       </div>
     </details>

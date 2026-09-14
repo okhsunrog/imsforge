@@ -26,6 +26,7 @@ const STEADY: u32 = 2;
 /// One SIM slot, as the modem reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sim {
+    pub slot: usize,
     pub mccmnc: String,
     pub spn: String,
 }
@@ -91,6 +92,7 @@ pub fn pair_sims(numerics_raw: &str, names_raw: &str) -> Vec<Sim> {
         .enumerate()
         .filter(|(_, mccmnc)| !mccmnc.is_empty())
         .map(|(slot, mccmnc)| Sim {
+            slot,
             mccmnc: mccmnc.to_string(),
             spn: if aligned {
                 names[slot].trim().to_string()
@@ -106,6 +108,7 @@ pub fn pair_sims(numerics_raw: &str, names_raw: &str) -> Vec<Sim> {
 /// Every slot has to carry both halves. A slot whose name has not arrived yet would have the IMS
 /// APN labelled after its MCCMNC for the whole boot, and a list whose two properties disagree in
 /// length makes [`pair_sims`] drop the names altogether rather than mis-pair them.
+#[cfg(test)]
 fn usable(sims: &[Sim]) -> bool {
     !sims.is_empty() && sims.iter().all(|sim| !sim.spn.is_empty())
 }
@@ -122,7 +125,7 @@ pub fn settled_sims(limit: Duration) -> Vec<Sim> {
 
     loop {
         let now = sims();
-        steady = if usable(&now) && previous.as_deref() == Some(now.as_slice()) {
+        steady = if sample_complete(&now) && previous.as_deref() == Some(now.as_slice()) {
             steady + 1
         } else {
             0
@@ -241,18 +244,27 @@ pub fn save(path: &Path, carriers: &[Resolved]) -> io::Result<()> {
         .iter()
         .map(|c| format!("{}\t{}\n", c.canonical_name, c.label))
         .collect();
-    atomic::write(path, text)
+    atomic::write(
+        path,
+        if text.is_empty() {
+            "# empty\n".to_owned()
+        } else {
+            text
+        },
+    )
 }
 
 fn parse_saved_line(line: &str) -> Option<Resolved> {
     let line = line.trim();
-    if line.is_empty() {
+    if line.is_empty() || line.starts_with('#') {
         return None;
     }
-    Some(match line.split_once('\t') {
+    let value = match line.split_once('\t') {
         Some((name, label)) => Resolved::new(name, label.trim()),
         None => Resolved::new(line, ""),
-    })
+    };
+    crate::config::validate_name(&value.canonical_name).ok()?;
+    Some(value)
 }
 
 /// Which carriers are in this phone, and how we found out.
@@ -262,13 +274,18 @@ fn parse_saved_line(line: &str) -> Option<Resolved> {
 /// run, not the exception.
 pub fn identify(src: &Path, sims_file: &Path, phone_files: &Path) -> (Vec<Resolved>, &'static str) {
     if let Ok(list) = load_carrier_list(src) {
-        let live: Vec<Resolved> = sims()
+        let sample = sims();
+        let complete = sample_complete(&sample);
+        let live: Vec<Resolved> = sample
             .iter()
             .filter_map(|sim| resolve(&list, sim).map(|name| Resolved::new(name, &sim.spn)))
             .collect();
-        if !live.is_empty() {
-            return (live, "live SIM properties");
+        if complete {
+            return (live, "complete live SIM properties");
         }
+    }
+    if fs::read_to_string(sims_file).is_ok_and(|s| s.trim() == "# empty") {
+        return (Vec::new(), "saved empty SIM inventory");
     }
     let saved = from_saved(sims_file);
     if !saved.is_empty() {
@@ -284,6 +301,68 @@ pub fn load_carrier_list(dir: &Path) -> Result<CarrierList, String> {
     let path = dir.join("carrier_list.pb");
     let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     CarrierList::parse_from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Readiness is per slot; equal samples alone do not prove an absent second modem is ready.
+pub fn sample_complete(sims: &[Sim]) -> bool {
+    complete_for_states(sims, &getprop("gsm.sim.state"))
+}
+
+fn complete_for_states(sims: &[Sim], states: &str) -> bool {
+    let states: Vec<_> = states.split(',').collect();
+    !states.is_empty()
+        && states
+            .iter()
+            .enumerate()
+            .all(|(slot, state)| match state.trim() {
+                "ABSENT" => !sims.iter().any(|s| s.slot == slot),
+                "LOADED" | "READY" => sims.iter().any(|s| s.slot == slot && !s.spn.is_empty()),
+                _ => false,
+            })
+        && sims.iter().all(|s| s.slot < states.len())
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn partial_and_empty_inventories_have_distinct_readiness() {
+        assert!(!complete_for_states(
+            &pair_sims("25001,", "MTS,"),
+            "LOADED,NOT_READY"
+        ));
+        assert!(!complete_for_states(
+            &pair_sims("25001,", "MTS,"),
+            "LOADED,LOADED"
+        ));
+        assert!(complete_for_states(
+            &pair_sims(",25001", ",MTS"),
+            "ABSENT,LOADED"
+        ));
+        assert!(complete_for_states(&[], "ABSENT,ABSENT"));
+        assert!(!complete_for_states(&[], "UNKNOWN,UNKNOWN"));
+        assert!(!complete_for_states(&[], ""));
+    }
+
+    #[test]
+    fn an_empty_saved_inventory_cannot_resurrect_an_old_carrier_cache() {
+        let dir = crate::testing::tempdir("empty-sims");
+        let saved = dir.join("sims");
+        save(&saved, &[]).unwrap();
+        let phone = dir.join("phone");
+        fs::create_dir(&phone).unwrap();
+        fs::write(
+            phone.join("carrierconfig-com.google.android.carrier-test.xml"),
+            "<string name=\"carrier_config_version_string\">25001-123.4</string>",
+        )
+        .unwrap();
+        assert!(
+            identify(&dir.join("no-live-list"), &saved, &phone)
+                .0
+                .is_empty()
+        );
+    }
 }
 
 #[cfg(test)]

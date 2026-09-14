@@ -5,4 +5,4 @@ rm -f /data/user_de/0/com.android.phone/files/carrierconfig-com.google.android.c
 
 # The stock cache is ours to clean up; the user's configuration is left in place so a
 # reinstall picks it up again.
-rm -rf /data/adb/imsforge/stock
+rm -rf /data/adb/imsforge/stock /data/adb/imsforge/stock.generations

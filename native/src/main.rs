@@ -2,8 +2,7 @@
 //!
 //! Reads the stock protobufs straight off /product, works out which carriers need IMS enabled,
 //! patches them and writes the result where the mount backend picks it up. Run from the module's
-//! post-fs-data.sh, this re-derives the patch from whatever Google shipped on this boot, so an OS
-//! update can never leave a stale snapshot behind.
+//! post-fs-data.sh, this derives the patch before the mount backend installs module files.
 
 mod atomic;
 mod cache;
@@ -11,7 +10,40 @@ mod config;
 mod detect;
 mod patch;
 mod plan;
+mod publish;
 mod status;
+fn read_config(args: &CheckArgs) -> Result<(), String> {
+    let config = Config::load(&args.config)?;
+    println!(
+        "{}",
+        serde_json::to_string(&config).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+fn save_config(args: &CheckArgs) -> Result<(), String> {
+    use std::io::Read;
+    let mut input = String::new();
+    std::io::stdin()
+        .take(1_048_577)
+        .read_to_string(&mut input)
+        .map_err(|e| e.to_string())?;
+    if input.len() > 1_048_576 {
+        return Err("invalid configuration: input exceeds 1 MiB".into());
+    }
+    let config = Config::parse(&input).map_err(|e| format!("invalid configuration: {e}"))?;
+    let text = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())? + "\n";
+    if let Some(parent) = args.config.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(at(parent))?;
+    }
+    let _lock = atomic::lock(&args.config.with_extension("lock")).map_err(at(&args.config))?;
+    atomic::write(&args.config, &text).map_err(at(&args.config))?;
+    print!("{text}");
+    Ok(())
+}
+
+#[cfg(test)]
+mod regression;
 #[cfg(test)]
 mod testing;
 
@@ -50,17 +82,23 @@ struct Cli {
 enum Command {
     /// Patch the CarrierSettings protobufs into a directory
     Patch(PatchArgs),
+    /// Generate, label and atomically install module files during post-fs-data
+    Apply(PatchArgs),
     /// Print, as JSON, what the inserted SIMs resolve to
     Detect(DetectArgs),
     /// Parse a carriers.json and report what it holds, changing nothing
     Check(CheckArgs),
+    /// Read the validated configuration, including defaults
+    ReadConfig(CheckArgs),
+    /// Validate JSON from stdin and atomically save it
+    SaveConfig(CheckArgs),
     /// Print, as JSON, what the last patch decided and whose files are at /product now
     Status(StatusArgs),
 }
 
 /// Where the CarrierSettings come from: the live directory, and our own copy of what Google
 /// shipped there — which is what a run has to fall back on once it has shadowed the original.
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct Sources {
     /// Stock CarrierSettings directory
     #[arg(long, value_name = "DIR", default_value = STOCK_DIR)]
@@ -71,7 +109,7 @@ struct Sources {
     stock_cache: PathBuf,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct PatchArgs {
     /// Where to write the patched protobufs
     #[arg(long, value_name = "DIR")]
@@ -88,9 +126,9 @@ struct PatchArgs {
     #[arg(long, value_name = "FILE", default_value = SIMS)]
     sims: PathBuf,
 
-    /// Where to record what this run decided, for the WebUI to read
-    #[arg(long, value_name = "FILE", default_value = STATUS)]
-    status: PathBuf,
+    /// Report path (patch: inside output; apply: persistent boot status)
+    #[arg(long, value_name = "FILE")]
+    status: Option<PathBuf>,
 
     /// Telephony's config cache, read to identify carriers when the modem is down
     #[arg(long, value_name = "DIR", default_value = PHONE_FILES)]
@@ -99,6 +137,8 @@ struct PatchArgs {
 
 #[derive(Args)]
 struct DetectArgs {
+    #[arg(long, value_name = "DIR", default_value = STOCK_CACHE)]
+    stock_cache: PathBuf,
     /// Remember the carriers for the next boot, when the modem will not be up in time
     #[arg(long)]
     save: bool,
@@ -129,6 +169,8 @@ struct CheckArgs {
 
 #[derive(Args)]
 struct StatusArgs {
+    #[arg(long, value_name = "FILE", default_value = CONFIG)]
+    config: PathBuf,
     #[command(flatten)]
     sources: Sources,
 
@@ -151,6 +193,11 @@ fn cmd_detect(args: &DetectArgs) -> Result<(), String> {
         seconds => detect::settled_sims(Duration::from_secs(seconds)),
     };
 
+    let complete = detect::sample_complete(&sims);
+    let stock_src = cache::effective_src(&args.src, &args.stock_cache);
+    let others = fs::read(stock_src.join("others.pb"))
+        .ok()
+        .and_then(|bytes| patch::parse_others(&bytes).ok());
     let mut items = Vec::new();
     let mut found: Vec<Resolved> = Vec::new();
     for sim in sims {
@@ -158,7 +205,17 @@ fn cmd_detect(args: &DetectArgs) -> Result<(), String> {
         if let Some(name) = &name {
             found.push(Resolved::new(name.clone(), sim.spn.clone()));
         }
+        let certified = name.as_ref().and_then(|name| {
+            others.as_ref().and_then(|others| {
+                Stock::new(&stock_src, others)
+                    .volte_enabled(name)
+                    .ok()
+                    .flatten()
+            })
+        });
         items.push(serde_json::json!({
+            "certified": certified,
+            "slot": sim.slot,
             "mccmnc": sim.mccmnc,
             "spn": sim.spn,
             "canonical_name": name,
@@ -166,10 +223,16 @@ fn cmd_detect(args: &DetectArgs) -> Result<(), String> {
     }
     // Serialised properly rather than by hand: an operator name carrying a quote or a backslash
     // would otherwise produce JSON the WebUI cannot parse, and it would show "no SIM detected".
-    println!("{}", serde_json::json!({ "auto": cfg.auto, "sims": items }));
+    println!(
+        "{}",
+        serde_json::json!({ "auto": cfg.auto, "sims": items, "complete": complete })
+    );
 
     // Persist the mapping for the next boot, when the modem will not be up in time.
-    if args.save && !found.is_empty() {
+    if args.save && !complete {
+        return Err("SIM inventory is incomplete; keeping the previous saved inventory".into());
+    }
+    if args.save {
         detect::save(&args.sims, &found).map_err(at(&args.sims))?;
         // On stderr, where it cannot disturb the JSON: the installer shows these lines to the
         // user, and reading them back out of the saved file would be a third place that has to
@@ -195,6 +258,7 @@ fn cmd_check(args: &CheckArgs) -> Result<(), String> {
             "auto": cfg.auto,
             "carriers": cfg.carriers.len(),
             "skip": cfg.skip.len(),
+            "config": cfg,
         })
     );
     Ok(())
@@ -209,17 +273,38 @@ fn cmd_status(args: &StatusArgs) -> Result<(), String> {
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .unwrap_or(serde_json::Value::Null);
+    let parsed = serde_json::from_value::<Status>(run.clone()).ok();
+    let boot_id = status::boot_id();
+    let current_boot = parsed
+        .as_ref()
+        .is_some_and(|r| !boot_id.is_empty() && r.boot_id == boot_id);
+    let matches_run = parsed
+        .as_ref()
+        .is_some_and(|r| cache::matches_files(&args.sources.src, &r.files));
+    let config = Config::load(&args.config);
+    let config_error = config.as_ref().err();
+    let config_changed = config
+        .as_ref()
+        .ok()
+        .and_then(|c| config_fingerprint(c).ok())
+        .zip(parsed.as_ref().and_then(|r| r.config_fingerprint))
+        .map(|(a, b)| a != b);
     println!(
         "{}",
         serde_json::json!({
+            "config_changed": config_changed, "config_error": config_error,
             "product": cache::product(&args.sources.src, &args.sources.stock_cache),
-            "run": run,
+            "run": run, "current_boot": current_boot, "matches_run": matches_run,
         })
     );
     Ok(())
 }
 
 fn cmd_patch(args: &PatchArgs) -> Result<(), String> {
+    publish::run(args, false, |_| Ok(()))
+}
+
+fn generate(args: &PatchArgs) -> Result<Status, String> {
     let out = &args.out;
     let cfg = Config::load(&args.config)?;
 
@@ -251,8 +336,9 @@ fn cmd_patch(args: &PatchArgs) -> Result<(), String> {
         println!("nothing to patch");
         // Still recorded: without it the WebUI would go on showing what some earlier boot
         // patched, while this boot left /product as Google shipped it.
-        write_status(&args.status, Status::new(source, plan.left_alone));
-        return Ok(());
+        let mut result = Status::new(source, plan.left_alone);
+        result.config_fingerprint = Some(config_fingerprint(&cfg)?);
+        return Ok(result);
     }
     fs::create_dir_all(out).map_err(at(out))?;
     for target in &plan.targets {
@@ -265,7 +351,7 @@ fn cmd_patch(args: &PatchArgs) -> Result<(), String> {
         patch::patch_others(others, &carriers).map_err(at(&others_path))?;
     let mut reported: Vec<patch::Report> = Vec::new();
     let dest = out.join("others.pb");
-    fs::write(&dest, &patched_others).map_err(at(&dest))?;
+    atomic::write(&dest, &patched_others).map_err(at(&dest))?;
     for report in &reports {
         changed += report.changes();
         println!(
@@ -285,7 +371,7 @@ fn cmd_patch(args: &PatchArgs) -> Result<(), String> {
         let parsed = patch::parse_single(&bytes).map_err(at(&path))?;
         let (patched, report) = patch::patch_single(parsed, carrier).map_err(at(&path))?;
         let dest = out.join(&name);
-        fs::write(&dest, &patched).map_err(at(&dest))?;
+        atomic::write(&dest, &patched).map_err(at(&dest))?;
         changed += report.changes();
         println!(
             "{name}: {} keys, IMS APN: {}",
@@ -294,10 +380,9 @@ fn cmd_patch(args: &PatchArgs) -> Result<(), String> {
         reported.push(report);
     }
 
-    write_status(
-        &args.status,
-        Status::new(source, plan::record(&plan, &reported)),
-    );
+    let mut result = Status::new(source, plan::record(&plan, &reported));
+    result.config_fingerprint = Some(config_fingerprint(&cfg)?);
+    result.files = cache::files(out).map_err(at(out))?;
 
     // A run that changed nothing means the source already carried our patch — that is, we were
     // reading our own output, not the stock files. Caching that would poison the cache with
@@ -306,31 +391,41 @@ fn cmd_patch(args: &PatchArgs) -> Result<(), String> {
         if changed == 0 {
             println!("  source is already patched, keeping the existing stock cache");
         } else {
-            cache::refresh(
-                &src,
-                &args.sources.stock_cache,
-                &plan.candidates,
-                &patched_others,
-            );
+            cache::refresh(&src, &args.sources.stock_cache)
+                .map_err(at(&args.sources.stock_cache))?;
         }
     }
-    Ok(())
+    if source == Source::Cache || changed > 0 {
+        cache::remember_output(
+            if source == Source::Cache {
+                &src
+            } else {
+                &args.sources.stock_cache
+            },
+            &result.files,
+        )
+        .map_err(at(&args.sources.stock_cache))?;
+    }
+    Ok(result)
 }
 
-/// A record we could not write is worth a line in the log and nothing more: the patch itself
-/// succeeded, and failing the run over it would keep the phone on the stock config.
-fn write_status(path: &Path, status: Status) {
-    if let Err(e) = status.write(path) {
-        eprintln!("  status: {e}");
-    }
+fn config_fingerprint(config: &Config) -> Result<u64, String> {
+    serde_json::to_vec(config)
+        .map(|bytes| cache::fingerprint(&bytes))
+        .map_err(|e| e.to_string())
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match &cli.command {
         Command::Patch(args) => cmd_patch(args),
+        Command::Apply(args) => {
+            publish::run(args, true, |stage| publish::label(stage, &args.sources.src))
+        }
         Command::Detect(args) => cmd_detect(args),
         Command::Check(args) => cmd_check(args),
+        Command::ReadConfig(args) => read_config(args),
+        Command::SaveConfig(args) => save_config(args),
         Command::Status(args) => cmd_status(args),
     };
     match result {
@@ -350,7 +445,7 @@ mod tests {
     use crate::testing::tempdir;
 
     /// A patch run over a scratch directory, with every path pointing into it.
-    fn args_in(dir: &Path) -> PatchArgs {
+    pub(super) fn args_in(dir: &Path) -> PatchArgs {
         PatchArgs {
             out: dir.join("out"),
             sources: Sources {
@@ -359,13 +454,13 @@ mod tests {
             },
             config: dir.join("carriers.json"),
             sims: dir.join("sims"),
-            status: dir.join("status.json"),
+            status: Some(dir.join("status.json")),
             phone_files: dir.join("phone"),
         }
     }
 
     /// Google's own file, on disk, as a run would find it. Returns the bytes it wrote.
-    fn write_stock(dir: &Path, carriers: &[(&str, bool)]) -> Vec<u8> {
+    pub(super) fn write_stock(dir: &Path, carriers: &[(&str, bool)]) -> Vec<u8> {
         let mut multi = MultiCarrierSettings::new();
         for (name, volte) in carriers {
             multi.setting.push(stock_settings(name, *volte));
@@ -428,7 +523,7 @@ mod tests {
         // A run that cannot recognise its own work: the fingerprint is gone and /product carries
         // the patch already. Copying that into the cache would leave patched data masquerading
         // as Google's, and every later run would judge carriers by it.
-        fs::remove_file(args.sources.stock_cache.join("output.fingerprint")).unwrap();
+        fs::remove_file(args.sources.stock_cache.join("outputs.json")).unwrap();
         fs::write(args.sources.src.join("others.pb"), &patched).unwrap();
         cmd_patch(&PatchArgs {
             out: dir.join("out-again"),

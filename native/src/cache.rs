@@ -8,6 +8,7 @@
 
 use crate::atomic;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -31,13 +32,33 @@ pub fn fingerprint(bytes: &[u8]) -> u64 {
 /// So each successful run records the fingerprint of what it produced. If the live file matches
 /// that, we are looking at ourselves and read the cached stock instead.
 pub fn effective_src(src: &Path, cache: &Path) -> PathBuf {
-    if is_ours(src, cache) && cache.join("others.pb").exists() {
-        return cache.to_path_buf();
+    for generation in generations(cache) {
+        if matches!(product_in(src, &generation), Product::Ours)
+            && generation.join("others.pb").is_file()
+        {
+            return generation;
+        }
     }
     src.to_path_buf()
 }
 
+fn generations(cache: &Path) -> Vec<PathBuf> {
+    let mut out = vec![cache.to_path_buf()];
+    if let Ok(entries) = fs::read_dir(cache.with_extension("generations")) {
+        out.extend(
+            entries
+                .flatten()
+                .filter(|e| {
+                    e.file_type().is_ok_and(|t| t.is_dir()) && e.path().join(".complete").is_file()
+                })
+                .map(|e| e.path()),
+        );
+    }
+    out
+}
+
 /// Is the file the system reads right now the one we produced?
+#[cfg(test)]
 pub fn is_ours(src: &Path, cache: &Path) -> bool {
     matches!(product(src, cache), Product::Ours)
 }
@@ -60,15 +81,47 @@ pub enum Product {
 }
 
 pub fn product(src: &Path, cache: &Path) -> Product {
+    let primary = product_in(src, cache);
+    if primary == Product::Ours {
+        return primary;
+    }
+    if generations(cache)
+        .iter()
+        .skip(1)
+        .any(|generation| product_in(src, generation) == Product::Ours)
+    {
+        return Product::Ours;
+    }
+    primary
+}
+
+fn product_in(src: &Path, cache: &Path) -> Product {
     let Ok(live) = fs::read(src.join("others.pb")) else {
         return Product::Other;
     };
-    let live = fingerprint(&live);
-    let ours = fs::read_to_string(cache.join("output.fingerprint"))
-        .ok()
-        .and_then(|t| t.trim().parse::<u64>().ok());
-    if ours == Some(live) {
+    let generated: Option<Vec<BTreeMap<String, u64>>> = match fs::read(cache.join("outputs.json")) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(value) => Some(value),
+            Err(_) => return Product::Other,
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Product::Other,
+    };
+    if generated
+        .as_ref()
+        .is_some_and(|outputs| outputs.iter().any(|files| matches_files(src, files)))
+    {
         return Product::Ours;
+    }
+    let live = fingerprint(&live);
+    // Only pre-format-2 installations used this weaker, single-file fingerprint.
+    if generated.is_none() {
+        let ours = fs::read_to_string(cache.join("output.fingerprint"))
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok());
+        if ours == Some(live) {
+            return Product::Ours;
+        }
     }
     match fs::read(cache.join("others.pb")) {
         Ok(stock) if fingerprint(&stock) == live => Product::Stock,
@@ -76,34 +129,100 @@ pub fn product(src: &Path, cache: &Path) -> Product {
     }
 }
 
-/// Keep a copy of the stock inputs plus the fingerprint of our output, so a later manual run has
-/// something truthful to read and can tell our work from Google's.
-///
-/// A cache that only half exists is worse than none: every later run judges carriers by it, and
-/// a file missing from it reads as "Google ships nothing for this carrier". So failures are
-/// reported rather than swallowed, even though they cannot fail the patch that already happened.
-pub fn refresh(src: &Path, cache: &Path, candidates: &[String], output: &[u8]) {
-    if let Err(e) = fs::create_dir_all(cache) {
-        eprintln!("  cache: {e}");
-        return;
-    }
-    let mut files = vec!["others.pb".to_string()];
-    files.extend(candidates.iter().map(|name| format!("{name}.pb")));
-    for name in files {
-        let from = src.join(&name);
-        if !from.exists() {
-            continue;
-        }
-        if let Err(e) = atomic::copy(&from, &cache.join(&name)) {
-            eprintln!("  cache: {name}: {e}");
+/// Fingerprints of the protobuf files in a directory.
+pub fn files(dir: &Path) -> std::io::Result<BTreeMap<String, u64>> {
+    let mut result = BTreeMap::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".pb") && entry.file_type()?.is_file() {
+            result.insert(name, fingerprint(&fs::read(entry.path())?));
         }
     }
-    if let Err(e) = atomic::write(
-        &cache.join("output.fingerprint"),
-        fingerprint(output).to_string(),
-    ) {
-        eprintln!("  cache: output.fingerprint: {e}");
+    Ok(result)
+}
+
+pub fn matches_files(dir: &Path, files: &BTreeMap<String, u64>) -> bool {
+    !files.is_empty()
+        && files.iter().all(|(name, expected)| {
+            // Manifests are persistent input too: reject paths before reading them.
+            name.strip_suffix(".pb")
+                .is_some_and(|n| n == "others" || crate::config::validate_name(n).is_ok())
+                && fs::read(dir.join(name)).is_ok_and(|bytes| fingerprint(&bytes) == *expected)
+        })
+}
+
+/// Publish a full snapshot, including standalone carriers not currently selected. This prevents
+/// old standalone files from overriding new entries in others.pb after an OS update.
+pub fn refresh(src: &Path, cache: &Path) -> std::io::Result<()> {
+    let inputs = files(src)?;
+    if inputs == files(cache).unwrap_or_default() && cache.join("others.pb").is_file() {
+        return Ok(());
     }
+    if let Some(parent) = cache.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // Keep older inputs while their generated files may still be mounted (or retained after
+    // failed preparation). An output must always resolve to its own stock generation.
+    if cache.join("others.pb").is_file() {
+        let archives = cache.with_extension("generations");
+        fs::create_dir_all(&archives)?;
+        let saved = atomic::temp_for(&archives.join("stock"));
+        fs::create_dir(&saved)?;
+        let archived = (|| {
+            for entry in fs::read_dir(cache)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    atomic::copy(&entry.path(), &saved.join(entry.file_name()))?;
+                }
+            }
+            atomic::write(&saved.join(".complete"), b"1\n")?;
+            fs::File::open(&saved)?.sync_all()?;
+            atomic::sync_parent(&saved)
+        })();
+        if let Err(error) = archived {
+            let _ = fs::remove_dir_all(&saved);
+            return Err(error);
+        }
+    }
+    let stage = atomic::temp_for(cache);
+    fs::create_dir(&stage)?;
+    let result = (|| {
+        for name in inputs.keys() {
+            atomic::copy(&src.join(name), &stage.join(name))?;
+        }
+        atomic::replace_dir(&stage, cache)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&stage);
+    }
+    result
+}
+
+/// Register each generated result against the current stock generation. A manual generation
+/// must not forget the still-mounted previous result.
+pub fn remember_output(cache: &Path, output: &BTreeMap<String, u64>) -> std::io::Result<()> {
+    if output.is_empty() {
+        return Ok(());
+    }
+    let path = cache.join("outputs.json");
+    let mut outputs: Vec<BTreeMap<String, u64>> = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let legacy = fs::read_to_string(cache.join("output.fingerprint"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            legacy
+                .into_iter()
+                .map(|hash| BTreeMap::from([("others.pb".to_string(), hash)]))
+                .collect()
+        }
+        Err(e) => return Err(e),
+    };
+    if !outputs.contains(output) {
+        outputs.push(output.clone());
+    }
+    atomic::write(&path, serde_json::to_vec(&outputs)?)
 }
 
 #[cfg(test)]
@@ -119,7 +238,7 @@ mod tests {
         let file = dir.join("others.pb");
         fs::write(&file, b"stock bytes").unwrap();
 
-        refresh(&dir, &dir, &[], b"output");
+        refresh(&dir, &dir).unwrap();
 
         assert_eq!(fs::read(&file).unwrap(), b"stock bytes");
     }

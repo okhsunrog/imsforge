@@ -6,7 +6,7 @@ use crate::protos::carrier_settings::{
 };
 use carrier_config::config::Value;
 use protobuf::{EnumOrUnknown, Message};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub const VOLTE_KEY: &str = "carrier_volte_available_bool";
@@ -16,7 +16,7 @@ pub const VOLTE_KEY: &str = "carrier_volte_available_bool";
 /// An outcome rather than a sentence: whether a run changed anything decides if the stock cache
 /// may be refreshed, and the WebUI reads it out of the run's record — neither may hang on how a
 /// log line happens to be worded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", content = "value", rename_all = "snake_case")]
 pub enum Apn {
     /// Turned off for this carrier in carriers.json.

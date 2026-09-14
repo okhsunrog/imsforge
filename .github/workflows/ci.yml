@@ -24,17 +24,8 @@ jobs:
         with:
           workspaces: native
 
-      - name: Format
-        working-directory: native
-        run: cargo fmt --check
-
-      - name: Clippy
-        working-directory: native
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Test
-        working-directory: native
-        run: cargo test
+      - name: Check
+        run: bash scripts/check.sh
 
       - uses: taiki-e/install-action@v2
         with:
@@ -47,20 +38,3 @@ jobs:
         with:
           name: imsforge
           path: dist/imsforge.zip
-
-  shell:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      # The module scripts run under Android's /system/bin/sh, which is toybox — far short of
-      # bash. Checking them as POSIX sh catches the bashisms it would choke on at boot.
-      - name: Shellcheck
-        run: |
-          shellcheck -s sh module/*.sh
-          shellcheck build.sh
-
-      # Nothing else ever loads the WebUI until it is on a phone, where a syntax error shows up
-      # as a blank screen with no explanation.
-      - name: WebUI
-        run: node --check module/webroot/app.js

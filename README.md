@@ -58,19 +58,17 @@ WebUI interface as KernelSU, so it works there unchanged; Magisk has no built-in
 [MMRL](https://github.com/MMRLApp/MMRL) and [KsuWebUI](https://github.com/a13e300/KsuWebUI)
 render it for any of them:
 
-- whether a mount backend is present and whether the patch actually reached `/product`;
-- what each SIM resolved to, and whether it was patched, skipped or unknown;
-- the carrier config telephony ended up using, IMS PDN state and the P-CSCF address;
-- overrides — add, edit or remove them, with a raw JSON editor for the rest.
+- backend availability, completed file installation for the current boot, and what this viewer sees;
+- per-slot carrier detection and draft/saved patch selection;
+- per-slot reported VoLTE flags and P-CSCF observations, with explicit read errors;
+- configuration editing, validation, saving and discarding a draft.
 
-It also explains the two states no patch can fix, instead of leaving them looking like a bug:
+A P-CSCF address is not proof of IMS registration or a working VoLTE call. Historical radio
+logs are not used as current state. Files can be visible to telephony but hidden from the WebUI
+by UID policy, SUSFS process marks or mount namespaces.
 
-- **`mVopsSupport = 3`** — the network is not offering voice over LTE to that SIM (`2` means it
-  is). No carrier config can override this.
-- **`IWLAN_IKEV2_AUTH_FAILURE`** — the carrier's ePDG answered your VoWiFi tunnel and *rejected
-  the authentication*: the subscription is not provisioned for it.
-
-Both mean "ask your carrier".
+See [device debugging (Russian)](docs/debugging.md) for ADB, ZeroMount UID exclusions,
+KernelSU profiles and byte-for-byte comparisons of stock and redirected files.
 
 ## Overrides
 
@@ -99,8 +97,8 @@ Settings → APNs, which otherwise comes from the name the SIM reports), `ims_ap
 
 An unknown key is rejected outright rather than ignored, so a typo cannot leave a setting that
 quietly does nothing — but it also means a bad file stops the next boot from patching anything.
-The WebUI therefore runs `imsforge check` over what you typed before it replaces the file that
-works, and you can do the same by hand: `imsforge check --config /data/adb/imsforge/carriers.json`.
+The WebUI uses `imsforge save-config` to validate stdin and atomically save it. To validate
+a file without changing anything, run: `imsforge check --config /data/adb/imsforge/carriers.json`.
 
 The key set written for each carrier mirrors what PixelIMS sets, minus
 `carrier_supports_ss_over_ut_bool` — that one breaks call forwarding when the carrier's XCAP
@@ -111,9 +109,8 @@ server is unreachable.
 On every boot, `post-fs-data.sh` runs the patcher **before the mount backend lays module files
 over the system**. Both implementations document that ordering — Magisk: *"Scripts run before any
 modules are mounted. This allows a module developer to dynamically adjust their modules before it
-gets mounted."* So at that moment `/product` still holds Google's originals, and the patch is
-derived from whatever this very boot shipped. That is why an OS update can never leave a stale
-snapshot behind.
+gets mounted."* When the backend follows that ordering, the patch is derived from the current
+stock files rather than a previous output.
 
 The patcher then:
 
@@ -132,16 +129,26 @@ The patcher then:
    the *version of the config app's APK*, not by the version of the protobuf data, so patched
    files would otherwise never be read.
 
-A copy of the stock inputs is kept in `stock/` next to the module, along with a fingerprint of
-what was produced. Run by hand later, `/product` shows imsforge's own output rather than Google's
-— reading that would make the "already certified?" check see our own work and skip everything, so
-the fingerprint tells the two apart and the cached stock is used instead. A run that changes
-nothing is treated as "we are reading ourselves" and never refreshes the cache.
+Boot scripts call `imsforge apply`: it generates files in a sibling staging directory, checks
+permissions and SELinux labels, invalidates the telephony cache, then exchanges the complete
+output directory atomically. Preparation errors leave the previous files in place. Directory
+exchange requires Linux `renameat2(RENAME_EXCHANGE)` support on the module filesystem; an
+unsupported filesystem fails explicitly instead of deleting the previous output.
 
-Each run also leaves `/data/adb/imsforge/status.json`: what it decided, carrier by carrier, and
-why. That is what the WebUI reads — it never parses the log, so the wording of a log line is not
-an interface. `imsforge status` prints that record along with whether the file the system is
-reading right now is the one imsforge wrote, which is the same fingerprint comparison as above.
+Stock snapshots live in `/data/adb/imsforge/stock`. Older generations are retained in
+`stock.generations` so an older mounted output can still resolve to its own stock inputs.
+Snapshots contain all standalone carrier files and are replaced as a whole. Generated output
+manifests are recorded separately; producing a new output does not forget the previous one.
+
+`apply` writes `/data/adb/imsforge/status.json` (format 2), including the boot ID, phase,
+configuration fingerprint and expected files. Only completed publication is reported as applied.
+`imsforge status` also checks whether the configuration changed and whether this process sees
+the expected bytes. It does not infer file delivery from a VoLTE flag of another SIM.
+
+Manual `imsforge patch --out DIR` replaces DIR with a generated result and writes its report
+to `DIR/.imsforge.json` by default. It does not publish a boot-success record. An explicit
+`--status FILE` can select another report path. Do not run `apply` manually after mounting
+just to inspect state. Configuration names must be single safe filename components.
 
 Protobuf surgery uses [rust-protobuf](https://github.com/stepancheg/rust-protobuf) specifically
 because it preserves fields that are not in our schema. Google may add fields to CarrierSettings
@@ -159,7 +166,9 @@ export ANDROID_NDK_HOME=~/Android/Sdk/ndk/<version>
 ./build.sh          # -> dist/imsforge.zip
 ```
 
-The zip carries no carrier data, so one build works on every device.
+The zip carries no carrier data. The default binary targets Android arm64; other ABIs can be
+selected with `ABI`. Branch and release CI both run `bash scripts/check.sh`, including native,
+CLI, WebUI and shell integration regressions.
 
 ## Layout
 
@@ -180,7 +189,8 @@ build.sh          cross-compiles and packs dist/imsforge.zip
   old row in place until the stock version itself moves.
 - MVNOs are matched by MCCMNC and SPN. Those distinguished only by IMSI prefix or GID1 fall back
   to the generic entry; add an explicit override if that is wrong for you.
-- Verified on a Pixel 8 Pro (husky), Android 17, KernelSU Next with NoMount. Magisk is
+- Verified on a Pixel 8 Pro (husky), Android 17, KernelSU Next with NoMount and later ZeroMount. This records the previous installed build;
+changes still require a new boot/calling validation. Magisk is
   expected to work — it documents the same script ordering and mounts module files itself — but
   it has not been tested on a device.
 

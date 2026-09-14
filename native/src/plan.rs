@@ -9,13 +9,13 @@ use crate::detect::Resolved;
 use crate::patch::{self, Report};
 use crate::protos::carrier_settings::MultiCarrierSettings;
 use crate::status::{Entry, Outcome};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 use std::fs;
 use std::path::Path;
 
 /// Why a carrier is in the patch list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reason {
     /// Named in carriers.json.
@@ -71,10 +71,14 @@ impl<'a> Stock<'a> {
     /// Does Google already enable VoLTE for this carrier? `None` when the stock data holds no
     /// entry for the name at all.
     pub fn volte_enabled(&self, name: &str) -> Result<Option<bool>, String> {
+        crate::config::validate_name(name)?;
         let own = self.dir.join(format!("{name}.pb"));
         if own.exists() {
             let bytes = fs::read(&own).map_err(at(&own))?;
             let settings = patch::parse_single(&bytes).map_err(at(&own))?;
+            if settings.canonical_name() != name {
+                return Err(format!("{}: carrier name mismatch", own.display()));
+            }
             return Ok(Some(patch::volte_enabled(&settings)));
         }
         Ok(self
@@ -125,36 +129,12 @@ pub fn name_apns(targets: &mut [Target], present: &[Resolved]) {
     }
 }
 
-/// Which carriers are in this phone, and how we found out.
-///
-/// Three sources, in order of quality. At post-fs-data the modem is not up yet, so the SIM
-/// properties are empty and only the last two work — which is the normal case for the boot-time
-/// run, not the exception.
-/// deliberately left alone too, or a later run has nothing to judge them by.
-pub fn candidates(cfg: &Config, present: &[Resolved]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for name in present
-        .iter()
-        .map(|p| &p.canonical_name)
-        .chain(cfg.carriers.iter().map(|c| &c.canonical_name))
-        .chain(cfg.skip.iter())
-    {
-        if !out.contains(name) {
-            out.push(name.clone());
-        }
-    }
-    out
-}
-
 /// What a run intends to do.
 pub struct Plan {
     /// The carriers to patch.
     pub targets: Vec<Target>,
     /// The carriers considered and left alone, for the record the WebUI reads.
     pub left_alone: Vec<Entry>,
-    /// Every name considered, including the skipped ones: the cache needs their stock files too,
-    /// or a later run has nothing to judge them by.
-    pub candidates: Vec<String>,
 }
 
 /// Work out what to patch, given the stock settings and the carriers found in the phone.
@@ -208,7 +188,6 @@ pub fn plan(cfg: &Config, stock: &Stock, present: &[Resolved]) -> Result<Plan, S
     Ok(Plan {
         targets,
         left_alone,
-        candidates: candidates(cfg, present),
     })
 }
 
@@ -304,8 +283,6 @@ mod tests {
         assert_eq!(plan.targets[0].reason, Reason::Detected);
         assert_eq!(plan.targets[0].carrier.ims_apn_name, "МТС IMS");
         assert_eq!(plan.targets[0].to_string(), "МТС (25001) — detected");
-        // The one we left alone still needs caching, or a later run cannot judge it.
-        assert!(plan.candidates.iter().any(|c| c == "25002"));
         // ...and the interface is told why it was left alone, rather than guessing from the log.
         assert_eq!(
             plan.left_alone,

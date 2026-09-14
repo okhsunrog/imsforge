@@ -12,20 +12,93 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-fn temp_for(path: &Path) -> PathBuf {
+/// Unique siblings prevent concurrent writers from truncating each other's temporary file.
+pub fn temp_for(path: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
+    name.push(format!(
+        ".tmp.{}.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     path.with_file_name(name)
+}
+
+pub fn sync_parent(path: &Path) -> io::Result<()> {
+    File::open(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?
+    .sync_all()
+}
+
+/// Held for the operation's lifetime; an interrupted process releases the kernel lock.
+pub fn lock(path: &Path) -> io::Result<File> {
+    use std::os::fd::AsRawFd;
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)?;
+    // SAFETY: flock only uses this live descriptor and scalar flags.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+/// Exchange complete directories without a moment at which the old output is absent.
+/// If the filesystem does not support exchange, fail before changing either directory.
+pub fn replace_dir(stage: &Path, dest: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    File::open(stage)?.sync_all()?;
+    if dest.exists() && (!dest.is_dir() || dest.is_symlink()) {
+        return Err(io::Error::other("destination must be a real directory"));
+    }
+    if dest.exists() {
+        let a = std::ffi::CString::new(stage.as_os_str().as_bytes())?;
+        let b = std::ffi::CString::new(dest.as_os_str().as_bytes())?;
+        // SAFETY: both C strings are live and NUL terminated for the duration of the syscall.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                a.as_ptr(),
+                libc::AT_FDCWD,
+                b.as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        sync_parent(dest)?;
+        // The exchange already committed. Failure to remove the old generation is not a
+        // failure of the publication; a subsequent run can clean this directory up.
+        if let Err(e) = fs::remove_dir_all(stage) {
+            eprintln!("old generation cleanup: {e}");
+        }
+    } else {
+        fs::rename(stage, dest)?;
+        sync_parent(dest)?;
+    }
+    Ok(())
 }
 
 /// Replace `path` with `bytes`.
 pub fn write(path: &Path, bytes: impl AsRef<[u8]>) -> io::Result<()> {
     let temp = temp_for(path);
     let result = (|| {
-        let mut file = File::create(&temp)?;
+        let mut file = File::options().write(true).create_new(true).open(&temp)?;
         file.write_all(bytes.as_ref())?;
         file.sync_all()?;
-        fs::rename(&temp, path)
+        fs::rename(&temp, path)?;
+        sync_parent(path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);

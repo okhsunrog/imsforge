@@ -7,15 +7,15 @@
 use crate::atomic;
 use crate::patch::{Apn, Report};
 use crate::plan::Reason;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
 /// Bumped when the shape below changes in a way an older WebUI could misread.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 /// Which files the run read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     /// Google's own, straight off /product.
@@ -25,7 +25,7 @@ pub enum Source {
 }
 
 /// What became of one carrier, and why.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Outcome {
     /// Patched; `reason` says what put it on the list.
@@ -43,11 +43,11 @@ pub enum Outcome {
 }
 
 /// One carrier in the record.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub canonical_name: String,
     /// Operator name the SIM reports; left out when the modem was down.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
     #[serde(flatten)]
     pub outcome: Outcome,
@@ -80,8 +80,13 @@ impl Entry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Status {
+    pub boot_id: String,
+    pub phase: String,
+    pub config_fingerprint: Option<u64>,
+    pub files: std::collections::BTreeMap<String, u64>,
+    pub error: Option<String>,
     pub format: u32,
     pub source: Source,
     pub carriers: Vec<Entry>,
@@ -91,6 +96,11 @@ impl Status {
     pub fn new(source: Source, carriers: Vec<Entry>) -> Self {
         Self {
             format: FORMAT,
+            boot_id: boot_id(),
+            phase: "generated".into(),
+            config_fingerprint: None,
+            files: Default::default(),
+            error: None,
             source,
             carriers,
         }
@@ -105,6 +115,13 @@ impl Status {
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         atomic::write(path, text + "\n").map_err(|e| format!("{}: {e}", path.display()))
     }
+}
+
+pub fn boot_id() -> String {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -130,7 +147,12 @@ mod tests {
         assert_eq!(
             json(&status),
             serde_json::json!({
-                "format": 1,
+                "format": 2,
+                "boot_id": boot_id(),
+                "phase": "generated",
+                "config_fingerprint": null,
+                "files": {},
+                "error": null,
                 "source": "stock",
                 "carriers": [{
                     "canonical_name": "25001",

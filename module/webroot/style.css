@@ -264,3 +264,7 @@ textarea {
   font-weight: 550;
   z-index: 10;
 }
+
+button:disabled { opacity: 0.5; cursor: default; }
+.row-actions { flex-wrap: wrap; }
+#diagnostic-errors { white-space: pre-wrap; overflow-wrap: anywhere; }

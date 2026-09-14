@@ -1,371 +1,232 @@
 'use strict';
 
 const MODDIR = '/data/adb/modules/imsforge';
-const DATADIR = '/data/adb/imsforge';
-const CONFIG = `${DATADIR}/carriers.json`;
-
+const CONFIG = '/data/adb/imsforge/carriers.json';
+const PROBE = `sh ${MODDIR}/probe.sh`;
 let cbId = 0;
 
-/** Run a shell command as root through the manager's bridge. */
 function exec(cmd) {
   return new Promise((resolve) => {
     const key = `_imsforge_cb_${Date.now()}_${cbId++}`;
-    window[key] = (errno, stdout, stderr) => {
+    let timer;
+    const finish = (errno, stdout, stderr) => {
+      clearTimeout(timer);
       delete window[key];
-      resolve({ errno, stdout: stdout || '', stderr: stderr || '' });
+      resolve({ errno: Number(errno), stdout: stdout || '', stderr: stderr || '' });
     };
-    if (typeof ksu !== 'undefined' && ksu.exec) {
-      try {
-        ksu.exec(cmd, '{}', key);
-      } catch (e) {
-        delete window[key];
-        resolve({ errno: 1, stdout: '', stderr: String(e && e.message) });
-      }
-    } else {
-      resolve({ errno: 1, stdout: '', stderr: 'no root bridge: open this from the manager' });
-    }
+    window[key] = finish;
+    timer = setTimeout(() => finish(1, '', 'The root command timed out. Refresh to check its result.'), 30000);
+    try {
+      if (typeof ksu === 'undefined' || !ksu.exec) throw new Error('Open this page from a root manager with WebUI support.');
+      ksu.exec(cmd, '{}', key);
+    } catch (error) { finish(1, '', String(error.message || error)); }
   });
 }
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
-  const n = document.createElement(tag);
-  if (cls) n.className = cls;
-  if (text !== undefined) n.textContent = text;
-  return n;
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
 };
+const clone = (value) => JSON.parse(JSON.stringify(value));
 
-function toast(msg) {
+function toast(message) {
   if (typeof ksu !== 'undefined' && ksu.toast) {
-    try { ksu.toast(msg); return; } catch (e) { /* fall through */ }
+    try { ksu.toast(message); return; } catch (_) { /* use the offline toast */ }
   }
-  const t = $('toast');
-  t.textContent = msg;
-  t.hidden = false;
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => { t.hidden = true; }, 2200);
+  $('toast').textContent = message;
+  $('toast').hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { $('toast').hidden = true; }, 2500);
 }
-
-function addRow(parent, label, valueNode) {
-  const row = el('div', 'row');
-  row.append(el('div', 'label', label));
-  const v = el('div', 'value');
-  v.append(valueNode);
-  row.append(v);
-  parent.append(row);
-}
-
-/* ------------------------------------------------------------------ state */
-
-const state = {
-  config: { auto: true, carriers: [], skip: [] },
-  sims: [],
-  patchedLastBoot: [],   // canonical names imsforge actually wrote on this boot
-  certified: [],         // carriers the patcher deliberately left to Google
-  booted: false,         // is there a record of a patch run to reason from at all
-  live: false,           // is the file the system reads right now our output
-  nothingToPatch: false, // the last run decided every carrier was fine as Google shipped it
-  ims: {},               // slot index -> { registered }
-  reasons: {},           // slot index -> carrier-side explanation when IMS is down
-};
 
 function showBanner(text, actionLabel, onClick) {
   $('banner-text').textContent = text;
-  const btn = $('banner-action');
-  btn.textContent = actionLabel || '';
-  btn.hidden = !actionLabel;
-  btn.onclick = onClick || null;
+  $('banner-action').textContent = actionLabel || '';
+  $('banner-action').hidden = !actionLabel;
+  $('banner-action').onclick = onClick || null;
   $('banner').hidden = false;
 }
 
-function markDirty() {
-  showBanner('Changes reach the phone only after you press Save.', 'Save', save);
+function addRow(parent, label, value, cls = 'idle') {
+  const row = el('div', 'row');
+  row.append(el('div', 'label', label));
+  const cell = el('div', 'value');
+  cell.append(el('span', `pill ${cls}`, value));
+  row.append(cell);
+  parent.append(row);
 }
 
-/* ------------------------------------------------------------------- load */
+const state = {
+  config: { auto: true, carriers: [], skip: [] },
+  saved: null, sims: [], status: {}, observations: {}, meta: 'unknown',
+  ready: false, dirty: false, busy: false, loadId: 0, errors: [],
+};
 
-// One shell invocation instead of ten: each trip across the bridge costs about 60 ms of pure
-// overhead, which dwarfed most of the commands themselves.
-const PROBE = `
-echo "@@version"; grep '^version=' ${MODDIR}/module.prop | cut -d= -f2
-echo "@@config"; cat ${CONFIG} 2>/dev/null
-echo "@@detect"; ${MODDIR}/bin/imsforge detect 2>/dev/null
-echo "@@log"; cat ${MODDIR}/last-boot.log 2>/dev/null
-echo "@@meta"; ls -d /data/adb/metamodule 2>/dev/null || echo missing
-echo "@@impl"; [ -d /data/adb/ksu ] && echo ksu || echo other
-echo "@@status"; ${MODDIR}/bin/imsforge status 2>/dev/null
-echo "@@volte"; dumpsys carrier_config 2>/dev/null | grep -E '^[[:space:]]*carrier_volte_available_bool =' | sort -u
-echo "@@ims"; logcat -b radio -d 2>/dev/null | grep isImsRegistered | tail -10
-echo "@@radio"; dumpsys telephony.registry 2>/dev/null | awk '
-  /^[[:space:]]*Phone Id=/ { split($0, a, "="); phone = a[2]; seen[phone] = 0 }
-  /mPreciseDataConnectionStates/ {
-    if ($0 ~ /PcscfAddresses: \[ \//) print "pdn", phone, "yes"; else print "pdn", phone, "no"
+// Preserve unknown keys so the Rust validator can reject them instead of silently dropping them.
+function normalize(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Configuration must be an object.');
+  const config = { ...value, auto: value.auto === undefined ? true : value.auto,
+    carriers: value.carriers === undefined ? [] : value.carriers,
+    skip: value.skip === undefined ? [] : value.skip };
+  if (typeof config.auto !== 'boolean' || !Array.isArray(config.carriers) || !Array.isArray(config.skip)) {
+    throw new Error('Expected a boolean auto and arrays carriers and skip.');
   }
-  /mVopsSupport/ && seen[phone] == 0 {
-    n = split($0, b, "mVopsSupport = ")
-    if (n > 1) { print "vops", phone, substr(b[2], 1, 1); seen[phone] = 1 }
+  if (config.skip.some((name) => typeof name !== 'string') || config.carriers.some((carrier) =>
+    !carrier || typeof carrier !== 'object' || Array.isArray(carrier) || typeof carrier.canonical_name !== 'string')) {
+    throw new Error('Each carrier needs a canonical_name; skip must contain names.');
   }
-  /IWLAN_IKEV2_AUTH_FAILURE/ { print "iwlan", phone }
-'
-`;
+  return config;
+}
 
 function sections(stdout) {
-  const out = {};
-  let key = null;
+  const result = {};
+  let key;
   for (const line of stdout.split('\n')) {
-    if (line.startsWith('@@')) {
-      key = line.slice(2).trim();
-      out[key] = [];
-    } else if (key) {
-      out[key].push(line);
-    }
+    if (line.startsWith('@@')) { key = line.slice(2).trim(); result[key] = []; }
+    else if (key) result[key].push(line);
   }
-  for (const k of Object.keys(out)) out[k] = out[k].join('\n').trim();
-  return out;
+  for (const name of Object.keys(result)) result[name] = result[name].join('\n').trim();
+  return result;
 }
 
-async function loadAll() {
-  const res = await exec(PROBE);
-  const s = sections(res.stdout);
-
-  $('version').textContent = (s.version || '').trim();
-
-  if (s.config) {
-    try {
-      const parsed = JSON.parse(s.config);
-      state.config = {
-        auto: parsed.auto !== false,
-        carriers: Array.isArray(parsed.carriers) ? parsed.carriers : [],
-        skip: Array.isArray(parsed.skip) ? parsed.skip : [],
-      };
-    } catch (e) {
-      toast('carriers.json is not valid JSON');
-    }
-  } else {
-    state.config = { auto: true, carriers: [], skip: [] };
-  }
-
-  try {
-    state.sims = JSON.parse(s.detect || '{}').sims || [];
-  } catch (e) {
-    state.sims = [];
-  }
-
-  // What the last patch decided, and whether it is what the system reads right now. The patcher
-  // writes this record for us: reconstructing it from the log would make the wording of a log
-  // line an interface, and a reworded line would silently make this screen lie.
-  let status = {};
-  try {
-    status = JSON.parse(s.status || '{}');
-  } catch (e) { /* no patcher, or one too old to answer */ }
-  const run = status.run && status.run.format === 1 ? status.run : null;
-  // "ours" is the only answer that means the mount backend delivered our files.
-  state.live = status.product === 'ours';
-  const carriers = run && Array.isArray(run.carriers) ? run.carriers : [];
-  const named = (outcome) =>
-    carriers.filter((c) => c.outcome === outcome).map((c) => c.canonical_name);
-
-  state.patchedLastBoot = named('patched');
-  // Only the patcher knows a carrier was left alone because Google already supports it; the
-  // interface must not guess that from the absence of a patch.
-  state.certified = named('certified');
-  state.booted = run !== null;
-  state.nothingToPatch = run !== null && state.patchedLastBoot.length === 0;
-
-  // A name in carriers.json that CarrierSettings has nothing for: valid JSON, accepted on save,
-  // and still nothing will ever come of it. Only the patcher can tell, and only after a boot.
-  const missing = named('missing');
-  const note = $('config-note');
-  note.textContent = missing.length
-    ? `carriers.json names ${missing.join(', ')} — no carrier by that name exists in this phone's `
-      + 'CarrierSettings, so nothing is patched for it.'
-    : '';
-  note.hidden = missing.length === 0;
-
-  $('log').textContent = s.log || 'no log yet — reboot once';
-
-  // Is IMS actually up, per slot?
-  //
-  // The IMS bearer is the thing to look at: an APN of type IMS that is connected and carries the
-  // P-CSCF address the network handed out. That is live state, read out of a dump.
-  //
-  // isImsRegistered in the radio log is only corroboration, and only where the dump said nothing
-  // about a slot at all: the line is a debug print from a getter, so it appears when something
-  // happens to call it — three times in an hour on a working phone — and then ages out of the
-  // ring buffer. Read the other way round, its absence would report a working SIM as broken.
-  //
-  // A slot missing from both is left unknown rather than called unregistered.
-  state.ims = {};
-  for (const m of (s.radio || '').matchAll(/^pdn (\d+) (yes|no)$/gm)) {
-    state.ims[Number(m[1])] = { registered: m[2] === 'yes' };
-  }
-  const logged = {};
-  // The last line per phone wins: or-ing them would keep reporting "registered" after IMS had
-  // dropped, simply because an older line in the buffer said so.
-  for (const m of (s.ims || '').matchAll(/Phone-(\d)\s*: isImsRegistered =(\w+)/g)) {
-    logged[Number(m[1])] = m[2] === 'true';
-  }
-  for (const slot of Object.keys(logged)) {
-    if (!state.ims[slot]) state.ims[slot] = { registered: logged[slot] };
-  }
-
-  // Two carrier-side states no patch can change. Naming them keeps the module from looking
-  // broken when the carrier simply does not offer the service.
-  //
-  // Per phone, and only the first value each one reports: the dump carries a whole history of
-  // service states, so a carrier whose VoLTE works right now still has older entries saying it
-  // did not. Reading them all at once and asking "is a 3 in there" blames the wrong SIM, and
-  // blames it for something that is no longer true.
-  state.reasons = {};
-  for (const m of (s.radio || '').matchAll(/^vops (\d+) (\d)$/gm)) {
-    if (m[2] === '3') {
-      state.reasons[Number(m[1])] = 'the network does not offer VoLTE to this SIM';
-    }
-  }
-  for (const m of (s.radio || '').matchAll(/^iwlan (\d+)$/gm)) {
-    const slot = Number(m[1]);
-    if (!state.reasons[slot]) {
-      state.reasons[slot] = 'the carrier rejected Wi-Fi calling authentication';
-    }
-  }
-
-  renderSims();
-  renderStatus(s);
-  syncRaw();
+function source(sections, name) {
+  if (sections[`${name}_ok`] !== '0') throw new Error(`${name}: ${sections[`${name}_error`] || 'data unavailable'}`);
+  return sections[name] || '';
 }
 
-/* ----------------------------------------------------------------- render */
+function controls() {
+  $('save').disabled = !state.ready || state.busy;
+  $('reboot').disabled = !state.ready || state.busy || state.dirty;
+  $('raw').disabled = !state.ready || state.busy;
+  $('discard').disabled = state.busy || !state.dirty;
+  $('refresh').disabled = state.busy;
+}
 
-/** What imsforge does with this carrier.
- *
- * The switch already shows the state, so the line below it only explains a reason the user did
- * not choose themselves — whether the config lists the carrier explicitly or detection found it
- * is an internal detail and stays out of the interface.
- */
+async function loadAll(discard = false) {
+  if (state.busy) return;
+  if (state.dirty && !discard) { toast('Save or discard your changes before refreshing.'); return; }
+  const id = ++state.loadId;
+  state.busy = true;
+  state.ready = false;
+  controls();
+  try {
+    const result = await exec(PROBE);
+    if (id !== state.loadId) return;
+    if (result.errno !== 0) throw new Error(result.stderr || 'Could not read module state.');
+    const data = sections(result.stdout);
+    const config = normalize(JSON.parse(source(data, 'config')));
+    const detected = JSON.parse(source(data, 'detect'));
+    const status = JSON.parse(source(data, 'status'));
+    if (!status || typeof status !== 'object' || Array.isArray(status)) throw new Error('Invalid status response.');
+    if (!Array.isArray(detected.sims) || detected.sims.some((sim) => !sim || !Number.isInteger(sim.slot) || sim.slot < 0)) {
+      throw new Error('SIM inventory does not contain valid slot IDs.');
+    }
+    state.config = config;
+    state.saved = clone(config);
+    state.sims = detected.sims;
+    state.status = status;
+    state.dirty = false;
+    state.errors = [];
+    state.meta = 'unknown';
+    try { state.meta = source(data, 'meta'); } catch (e) { state.errors.push(e.message); }
+    state.observations = {};
+    for (const name of ['radio', 'carrier']) {
+      try {
+        for (const match of source(data, name).matchAll(/^(pcscf|vops|volte) (\d+) (yes|no|true|false|\d+)$/gm)) {
+          const slot = Number(match[2]);
+          state.observations[slot] ||= {};
+          state.observations[slot][match[1]] = match[3];
+        }
+      } catch (e) { state.errors.push(e.message); }
+    }
+    if (!detected.complete) state.errors.push('SIM inventory is still settling; some slots may be missing.');
+    $('version').textContent = (data.version || '').match(/^version=(.*)$/m)?.[1] || '';
+    $('log').textContent = data.log_ok === '0' ? data.log : 'Boot log unavailable.';
+    state.ready = true;
+    syncRaw();
+    renderSims();
+    renderStatus();
+  } catch (error) {
+    showBanner(`Could not refresh: ${error.message}. Saving is disabled until a successful refresh.`, 'Retry', () => loadAll(discard));
+  } finally {
+    state.busy = false;
+    controls();
+    renderSims();
+  }
+}
+
+function currentRun() {
+  const run = state.status.run;
+  return state.status.current_boot && run?.format === 2 ? run : null;
+}
+
 function carrierPlan(name) {
   if (!name) return { on: false, disabled: true, what: 'Unknown carrier — nothing to patch' };
-  if (state.config.skip.includes(name)) {
-    return { on: false, disabled: false, what: 'Not patched' };
-  }
-  const on = state.config.carriers.some((c) => c.canonical_name === name)
-    || state.patchedLastBoot.includes(name);
-  if (on) {
-    return {
-      on: true,
-      disabled: false,
-      what: state.patchedLastBoot.includes(name) ? 'Patched' : 'Will be patched on the next boot',
-    };
-  }
-  if (state.certified.includes(name)) {
-    return { on: false, disabled: false, what: 'Google already enables VoLTE here — no patch needed' };
-  }
-  if (!state.booted) {
-    return { on: false, disabled: false, what: 'Not patched yet — reboot to apply' };
-  }
-  return { on: false, disabled: false, what: 'Not patched' };
+  const sim = state.sims.find((item) => item.canonical_name === name);
+  const explicit = state.config.carriers.some((carrier) => carrier.canonical_name === name);
+  const on = !state.config.skip.includes(name) && (explicit || (state.config.auto && sim?.certified === false));
+  const patched = currentRun()?.phase === 'applied' && currentRun().carriers.some((c) => c.canonical_name === name && c.outcome === 'patched');
+  let what;
+  if (state.dirty) what = on ? 'Will be enabled when saved' : 'Will be disabled when saved';
+  else if (on) what = patched && state.status.config_changed === false ? 'Patch files installed on this boot' : 'Enabled in configuration — applies on reboot';
+  else if (!explicit && !state.config.skip.includes(name) && sim?.certified === true) what = 'Google enables VoLTE in the stock settings';
+  else if (state.config.auto && sim?.certified == null && !explicit && !state.config.skip.includes(name)) what = 'Stock settings unavailable — automatic decision unknown';
+  else what = patched ? 'Disabled in configuration — reboot to remove the patch' : 'Not selected for patching';
+  return { on, disabled: !state.ready || state.busy, what };
 }
 
 function renderSims() {
   const box = $('sims');
   box.replaceChildren();
-  if (!state.sims.length) {
-    box.append(el('p', 'hint', 'No SIM detected.'));
-    return;
-  }
-
-  state.sims.forEach((sim, slot) => {
-    const name = sim.canonical_name;
-    const plan = carrierPlan(name);
+  if (!state.sims.length) { box.append(el('p', 'hint', state.ready ? 'No SIM reported.' : 'SIM inventory unavailable.')); return; }
+  for (const sim of state.sims) {
+    const plan = carrierPlan(sim.canonical_name);
     const card = el('div', 'sim');
-
     const head = el('div', 'sim-head');
     const titles = el('div');
     titles.append(el('div', 'sim-name', sim.spn || sim.mccmnc));
-    // Google names an unsupported carrier's entry after its MCCMNC, so the two are often the
-    // same string — printing "25001 · 25001" just looks like a bug.
-    const meta = !name || name === sim.mccmnc ? sim.mccmnc : `${sim.mccmnc} · ${name}`;
-    titles.append(el('div', 'sim-meta', meta));
+    titles.append(el('div', 'sim-meta', `Slot ${sim.slot + 1} · ${sim.canonical_name || sim.mccmnc}`));
     head.append(titles);
-
-    // One control, one meaning: patch this carrier, or do not.
-    const sw = el('button', `switch${plan.on ? ' on' : ''}`);
-    sw.setAttribute('role', 'switch');
-    sw.setAttribute('aria-checked', String(plan.on));
-    sw.disabled = plan.disabled;
-    sw.onclick = () => toggleCarrier(name, !plan.on);
-    sw.append(el('span', 'knob'));
-    head.append(sw);
-    card.append(head);
-
-    card.append(el('div', 'sim-state', plan.what));
-
-    // Did it actually work? The config state alone cannot answer that.
-    const ims = state.ims[slot];
-    const line = el('div', 'sim-ims');
-    if (ims && ims.registered) {
-      line.classList.add('good');
-      line.textContent = 'VoLTE is working — IMS registered';
-    } else if (!ims) {
-      // Nothing to go on. Calling that "not registered" would be a guess, and on a phone that
-      // has been up a while it would be the wrong one.
-      if (plan.on) {
-        line.classList.add('muted');
-        line.textContent = 'IMS state unknown';
-      }
-    } else if (plan.on) {
-      line.classList.add('warn');
-      const why = state.reasons[slot];
-      line.textContent = why
-        ? `IMS not registered — ${why}. That is a carrier-side setting; no patch can change it.`
-        : 'IMS not registered yet';
-    } else {
-      line.classList.add('muted');
-      line.textContent = 'IMS not registered';
-    }
-    if (line.textContent) card.append(line);
-
+    const button = el('button', `switch${plan.on ? ' on' : ''}`);
+    button.setAttribute('role', 'switch');
+    button.setAttribute('aria-checked', String(plan.on));
+    button.disabled = plan.disabled;
+    button.onclick = () => toggleCarrier(sim.canonical_name, !plan.on);
+    button.append(el('span', 'knob'));
+    head.append(button);
+    card.append(head, el('div', 'sim-state', plan.what));
+    const observed = state.observations[sim.slot] || {};
+    card.append(el('div', 'sim-ims muted', observed.volte === undefined ? 'Reported VoLTE flag: unavailable' : `Reported VoLTE flag: ${observed.volte === 'true' ? 'enabled' : 'disabled'}`));
+    const pcscf = observed.pcscf === 'yes' ? 'P-CSCF address observed' : observed.pcscf === 'no' ? 'No P-CSCF address observed' : 'P-CSCF observation unavailable';
+    card.append(el('div', 'sim-ims muted', `${pcscf}. IMS registration is not verified by this check.`));
+    if (observed.vops === '3') card.append(el('div', 'sim-ims warn', 'The current mobile network reports VoPS unsupported. Wi-Fi calling is a separate service.'));
     box.append(card);
-  });
+  }
 }
 
-function renderStatus(s) {
+function renderStatus() {
   const rows = $('status-rows');
   rows.replaceChildren();
-
-  const hasMeta = !(s.meta || '').includes('missing');
-  const isKsu = (s.impl || '').trim() === 'ksu';
-  const pill = (cls, text) => el('span', `pill ${cls}`, text);
-
-  addRow(rows, 'Mount backend',
-    hasMeta ? pill('ok', 'present') : (isKsu ? pill('bad', 'missing') : pill('idle', 'built in')));
-
-  const volte = /carrier_volte_available_bool = true/.test(s.volte || '');
-  // Did this boot write a patch at all? state.live answers a narrower question — whether the
-  // file THIS process reads at /product is ours — and a root shell or an app confined to its own
-  // mount namespace can be told our file is not there while the patch was applied all the same.
-  const applied = state.booted && state.patchedLastBoot.length > 0;
-
-  addRow(rows, 'Patch active on this boot',
-    state.live ? pill('ok', 'yes')
-      : state.nothingToPatch ? pill('idle', 'nothing to patch')
-        // Written this boot, but not the file we are reading here: normal when the mount backend
-        // hands the module's files to some apps and not to this viewer. Only a fault if telephony
-        // — the one process that must see it — did not either, and that is the row below.
-        : applied ? pill('idle', 'applied on boot')
-          : pill('bad', 'no'));
-
-  addRow(rows, 'Telephony sees VoLTE enabled', volte ? pill('ok', 'yes') : pill('bad', 'no'));
-
-  if (!hasMeta && isKsu) {
-    showBanner('No mount backend installed — nothing this module writes can reach the system.', '', null);
-  } else if (!state.booted) {
-    // No record of a run: a fresh install before its first reboot.
-    showBanner('Not applied yet. Reboot to apply the patch.', 'Reboot', reboot);
-  } else if (applied && !state.live && !volte) {
-    // The patch was written, this viewer does not see it, and neither does telephony — so it is
-    // not just a namespace the viewer is outside of; the backend is not delivering the files.
-    showBanner('The patch was applied on boot but the system is not reading it. Reboot to reapply.', 'Reboot', reboot);
-  }
+  const run = currentRun();
+  addRow(rows, 'Mount backend', state.meta, state.meta === 'missing' ? 'bad' : 'idle');
+  const published = run?.phase === 'applied';
+  addRow(rows, 'Files installed this boot', published ? (run.files && Object.keys(run.files).length ? 'yes' : 'no patch needed') : run?.phase || 'not confirmed', published ? 'ok' : 'idle');
+  addRow(rows, 'Expected files visible here', published && Object.keys(run.files || {}).length ? (state.status.matches_run ? 'yes' : 'not observed') : 'not checked');
+  const missing = (run?.carriers || []).filter((c) => c.outcome === 'missing').map((c) => c.canonical_name);
+  $('config-note').textContent = missing.length ? `No CarrierSettings entry for: ${missing.join(', ')}.` : '';
+  $('config-note').hidden = !missing.length;
+  $('banner').hidden = true;
+  if (state.dirty) markDirty();
+  else if (state.meta === 'missing') showBanner('No mount backend found. Install one before applying this module.');
+  else if (run?.phase === 'failed') showBanner(`The boot update failed: ${run.error || 'see the boot log'}. Check the log before rebooting.`);
+  else if (run?.phase === 'preparing') showBanner('The boot update did not record completion. Check the boot log.');
+  else if (state.status.config_changed === true || !published) showBanner('The saved configuration has not been confirmed on this boot. Reboot to apply it.', 'Reboot', reboot);
+  else if (!state.status.matches_run && Object.keys(run.files || {}).length) showBanner('Files were installed, but this viewer does not see them. Mount namespaces can differ; this does not establish what telephony reads.');
+  $('diagnostic-errors').textContent = state.errors.join('\n');
+  $('diagnostic-errors').hidden = !state.errors.length;
 }
 
 function syncRaw() {
@@ -373,85 +234,88 @@ function syncRaw() {
   $('raw-error').textContent = '';
 }
 
-/* ---------------------------------------------------------------- actions */
+function markDirty() {
+  state.dirty = true;
+  controls();
+  showBanner('Changes have not been saved.', 'Save', save);
+}
 
 function toggleCarrier(name, on) {
-  state.config.skip = state.config.skip.filter((s) => s !== name);
-  const pinned = state.config.carriers.some((c) => c.canonical_name === name);
-
-  if (on) {
-    // Turning a carrier on normally just lifts the skip and lets detection do its job. An
-    // explicit entry is only added when detection would pass the carrier over, because such an
-    // entry permanently bypasses the "Google already supports this" safety check.
-    if (!pinned && state.certified.includes(name)) {
-      state.config.carriers.push({ canonical_name: name });
+  if (!state.ready || state.busy) return;
+  try {
+    const config = normalize(JSON.parse($('raw').value));
+    config.skip = config.skip.filter((item) => item !== name);
+    if (on) {
+      const sim = state.sims.find((item) => item.canonical_name === name);
+      if ((!config.auto || sim?.certified !== false) && !config.carriers.some((c) => c.canonical_name === name)) config.carriers.push({ canonical_name: name });
+    } else {
+      config.carriers = config.carriers.filter((c) => c.canonical_name !== name);
+      config.skip.push(name);
     }
-  } else {
-    state.config.carriers = state.config.carriers.filter((c) => c.canonical_name !== name);
-    state.config.skip.push(name);
-  }
-  renderSims();
-  syncRaw();
-  markDirty();
+    state.config = config;
+    markDirty();
+    syncRaw();
+    renderSims();
+  } catch (error) { $('raw-error').textContent = error.message; toast('Fix the JSON draft before changing a switch.'); }
 }
 
 async function save() {
-  const raw = $('raw').value.trim();
-  if ($('raw-details').open && raw) {
-    try {
-      state.config = JSON.parse(raw);
-      renderSims();
-    } catch (e) {
-      $('raw-error').textContent = String(e.message);
-      toast('Invalid JSON');
-      return;
+  if (!state.ready || state.busy) return;
+  let draft;
+  try { draft = normalize(JSON.parse($('raw').value)); }
+  catch (error) { $('raw-error').textContent = error.message; toast('Invalid configuration'); return; }
+  const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(draft))));
+  state.busy = true;
+  controls();
+  renderSims();
+  let savedOk = false;
+  try {
+    const result = await exec(`printf '%s' '${b64}' | base64 -d | ${MODDIR}/bin/imsforge save-config --config ${CONFIG}`);
+    if (result.errno !== 0) {
+      const error = new Error(result.stderr || 'Could not save. Refresh to check whether the command completed.');
+      error.validation = /^imsforge: invalid configuration:/m.test(result.stderr || '');
+      throw error;
     }
-  }
-
-  // Written to one side and checked by the patcher before it replaces anything: the patcher
-  // rejects a key it does not know, and a configuration it rejects stops the next boot from
-  // patching at all. Finding that out here beats finding it out from a log after a reboot.
-  //
-  // base64 keeps quotes, newlines and non-ASCII intact through the shell.
-  const text = JSON.stringify(state.config, null, 2) + '\n';
-  const b64 = btoa(unescape(encodeURIComponent(text)));
-  const res = await exec(`
-mkdir -p ${DATADIR} || exit 1
-echo '${b64}' | base64 -d > ${CONFIG}.new || exit 1
-${MODDIR}/bin/imsforge check --config ${CONFIG}.new || { rm -f ${CONFIG}.new; exit 1; }
-chmod 644 ${CONFIG}.new && mv ${CONFIG}.new ${CONFIG} && echo saved
-`);
-  if (res.errno !== 0 || !res.stdout.includes('saved')) {
-    const why = (res.stderr || '').replace(/^imsforge: \S*:\s*/m, '').trim();
-    $('raw-error').textContent = why;
-    toast(why ? 'Rejected: ' + why.split('\n')[0] : 'Could not write the configuration');
-    return;
-  }
-  toast('Saved');
-  showBanner('Saved. The new configuration is applied on the next boot.', 'Reboot', reboot);
+    const saved = normalize(JSON.parse(result.stdout));
+    state.config = saved;
+    state.saved = clone(saved);
+    state.dirty = false;
+    syncRaw();
+    savedOk = true;
+    toast('Saved');
+  } catch (error) {
+    $('raw-error').textContent = error.message;
+    if (error.validation) { markDirty(); toast('Configuration rejected — correct the draft and save again.'); }
+    else {
+      state.ready = false;
+      showBanner(`Save was not confirmed: ${error.message}`, 'Refresh', () => loadAll(true));
+    }
+  } finally { state.busy = false; controls(); renderSims(); }
+  if (savedOk) await loadAll();
 }
 
 async function reboot() {
-  showBanner('Rebooting…', '', null);
-  await exec('svc power reboot || reboot');
+  if (!state.ready || state.busy || state.dirty) { toast('Save or discard changes first.'); return; }
+  state.busy = true;
+  controls();
+  showBanner('Rebooting…');
+  const result = await exec('svc power reboot || reboot');
+  if (result.errno !== 0) { state.busy = false; controls(); showBanner(result.stderr || 'Could not reboot.'); }
 }
 
-/* ------------------------------------------------------------------- init */
-
-$('refresh').onclick = async () => {
-  $('banner').hidden = true;
-  await loadAll();
-  toast('Refreshed');
-};
+$('refresh').onclick = () => loadAll();
+$('discard').onclick = () => loadAll(true);
 $('save').onclick = save;
 $('reboot').onclick = reboot;
-$('raw-format').onclick = () => {
-  try {
-    $('raw').value = JSON.stringify(JSON.parse($('raw').value), null, 2);
-    $('raw-error').textContent = '';
-  } catch (e) {
-    $('raw-error').textContent = String(e.message);
-  }
+$('raw').oninput = () => {
+  markDirty();
+  try { state.config = normalize(JSON.parse($('raw').value)); $('raw-error').textContent = ''; }
+  catch (error) { $('raw-error').textContent = error.message; }
+  renderSims();
 };
-
+$('raw-format').onclick = () => {
+  try { $('raw').value = JSON.stringify(JSON.parse($('raw').value), null, 2); }
+  catch (error) { $('raw-error').textContent = error.message; }
+};
+controls();
 loadAll();

@@ -5,7 +5,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 ABI=${ABI:-arm64-v8a}
-TARGET=${TARGET:-aarch64-linux-android}
+case "$ABI" in
+    arm64-v8a) EXPECTED_TARGET=aarch64-linux-android ;;
+    armeabi-v7a) EXPECTED_TARGET=armv7-linux-androideabi ;;
+    x86) EXPECTED_TARGET=i686-linux-android ;;
+    x86_64) EXPECTED_TARGET=x86_64-linux-android ;;
+    *) echo "unsupported ABI: $ABI" >&2; exit 1 ;;
+esac
+TARGET=${TARGET:-$EXPECTED_TARGET}
+[ "$TARGET" = "$EXPECTED_TARGET" ] || { echo "ABI/TARGET mismatch" >&2; exit 1; }
 DIST=dist
 STAGE=$DIST/module
 
@@ -29,14 +37,15 @@ command -v cargo-ndk >/dev/null || {
 }
 
 echo "==> building $TARGET"
-(cd native && cargo ndk -t "$ABI" build --release)
+(cd native && cargo ndk -t "$ABI" build --release --locked)
 
 echo "==> assembling $STAGE"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin"
 install -m 755 "native/target/$TARGET/release/imsforge" "$STAGE/bin/imsforge"
 install -m 755 module/post-fs-data.sh module/service.sh module/action.sh \
-    module/customize.sh module/uninstall.sh "$STAGE/"
+    module/customize.sh module/uninstall.sh module/probe.sh "$STAGE/"
+install -m 644 module/*.awk "$STAGE/"
 install -m 644 module/module.prop "$STAGE/"
 # A marker the manager will file wherever it keeps module content, so the module can see at boot
 # which layout it got rather than guess from the root implementation.

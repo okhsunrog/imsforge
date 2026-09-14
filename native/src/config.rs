@@ -1,6 +1,6 @@
 //! carriers.json — optional. Without it, imsforge patches whatever the inserted SIMs need.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
@@ -47,7 +47,7 @@ fn default_apn_value() -> String {
 
 /// One carrier. Everything except the name is optional; the defaults are what the common case
 /// needs, so an explicit entry is only for overrides.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Carrier {
     pub canonical_name: String,
@@ -100,7 +100,7 @@ impl Carrier {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Patch carriers of the inserted SIMs automatically. On by default; the whole point is
@@ -129,7 +129,25 @@ impl Default for Config {
 impl Config {
     /// Parse a configuration, wherever its text came from.
     pub fn parse(text: &str) -> Result<Self, String> {
-        serde_json::from_str(text).map_err(|e| e.to_string())
+        let config: Self = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let mut names = std::collections::BTreeSet::new();
+        for carrier in &config.carriers {
+            validate_name(&carrier.canonical_name)?;
+            if !names.insert(&carrier.canonical_name) {
+                return Err(format!("duplicate carrier: {}", carrier.canonical_name));
+            }
+            if carrier
+                .bools
+                .keys()
+                .any(|k| carrier.int_arrays.contains_key(k))
+            {
+                return Err("a config key cannot be both a boolean and an integer array".into());
+            }
+        }
+        for name in &config.skip {
+            validate_name(name)?;
+        }
+        Ok(config)
     }
 
     /// A missing file is not an error: it means "defaults", which is the normal case.
@@ -150,6 +168,22 @@ impl Config {
     pub fn entry(&self, name: &str) -> Option<&Carrier> {
         self.carriers.iter().find(|c| c.canonical_name == name)
     }
+}
+
+/// Carrier identifiers are filenames, never paths.
+pub fn validate_name(name: &str) -> Result<(), String> {
+    if !name
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphanumeric)
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        || matches!(name, "others" | "carrier_list")
+    {
+        return Err(format!("invalid canonical_name: {name:?}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

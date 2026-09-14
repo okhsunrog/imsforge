@@ -38,22 +38,8 @@ jobs:
 
       # The same gates as ci.yml: a tag should never produce an artifact the branch would have
       # rejected.
-      - name: Format
-        working-directory: native
-        run: cargo fmt --check
-
-      - name: Clippy
-        working-directory: native
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Test
-        working-directory: native
-        run: cargo test
-
-      - name: Shellcheck
-        run: |
-          shellcheck -s sh module/*.sh
-          shellcheck build.sh
+      - name: Check
+        run: bash scripts/check.sh
 
       - uses: taiki-e/install-action@v2
         with:

@@ -21,7 +21,7 @@ case "$MODDIR" in
     *) MODDIR=$(cd "$MODDIR" && pwd) || exit 1 ;;
 esac
 DATADIR=/data/adb/imsforge
-mkdir -p "$DATADIR"
+mkdir -p "$DATADIR" || exit 1
 
 # Where the mount backend expects our files, worked out by observation rather than by guessing
 # from which root implementation is installed.
@@ -37,7 +37,7 @@ LAYOUT=""
 for prefix in product system/product; do
     if [ -e "$MODDIR/$prefix/etc/CarrierSettings/.keep" ]; then
         LAYOUT=$prefix
-        echo "$LAYOUT" > "$DATADIR/layout"
+        echo "$LAYOUT" > "$DATADIR/layout.new" && mv "$DATADIR/layout.new" "$DATADIR/layout" || exit 1
         break
     fi
 done
@@ -72,44 +72,9 @@ OUT="$MODDIR/$LAYOUT/etc/CarrierSettings"
     [ -f "$MODDIR/carriers.json" ] && [ ! -f "$DATADIR/carriers.json" ] &&
         mv "$MODDIR/carriers.json" "$DATADIR/carriers.json" && echo "  migrated carriers.json"
 
-    # Patch into a staging directory and swap it in, rather than writing over what is already
-    # there. Nothing else would ever remove a file: turn a carrier off and last boot's patched
-    # copy would sit in place and keep being mounted, so the switch would appear to do nothing.
-    STAGE="$OUT.new"
-    rm -rf "$STAGE"
-    mkdir -p "$STAGE"
-
-    if "$MODDIR/bin/imsforge" patch --out "$STAGE" --config "$DATADIR/carriers.json" \
-        --stock-cache "$DATADIR/stock"; then
-        # Files created at runtime inherit adb_data_file from /data/adb. Mounted over /product
-        # with that label, com.google.android.carrier cannot read them — so relabel to match a
-        # stock file.
-        # ls, because find cannot print an SELinux context and the path is fixed anyway.
-        # shellcheck disable=SC2012
-        ctx=$(ls -Z /product/etc/CarrierSettings/carrier_list.pb 2>/dev/null | awk '{print $1}')
-        if [ -n "$ctx" ]; then
-            chcon "$ctx" "$STAGE"/*.pb 2>/dev/null && echo "  relabelled to $ctx"
-        fi
-        chmod 644 "$STAGE"/*.pb 2>/dev/null
-
-        rm -rf "$OUT"
-        if [ -n "$(ls -A "$STAGE" 2>/dev/null)" ]; then
-            mv "$STAGE" "$OUT"
-        else
-            rm -rf "$STAGE"
-            echo "  nothing to patch — /product is left as Google shipped it"
-        fi
-    else
-        rm -rf "$STAGE"
-        echo "  ! patching failed, keeping the previous output"
-    fi
-
-    # Telephony invalidates its carrier config cache by the *version of the config app's APK*,
-    # not by the version of the protobuf data, so without this the patched files are never read.
-    found=0
-    for f in "$PHONE_FILES"/carrierconfig-com.google.android.carrier-*.xml; do
-        [ -e "$f" ] || continue
-        rm -f "$f" && echo "  cache: removed $(basename "$f")" && found=$((found + 1))
-    done
-    [ "$found" -eq 0 ] && echo "  cache: already empty"
+    # apply owns generation, labelling, cache invalidation and atomic publication. Its report
+    # records this boot only after the files have been installed successfully.
+    "$MODDIR/bin/imsforge" apply --out "$OUT" --config "$DATADIR/carriers.json" \
+        --stock-cache "$DATADIR/stock" --status "$DATADIR/status.json" \
+        --phone-files "$PHONE_FILES" || exit 1
 } > "$MODDIR/$LOG_NAME" 2>&1

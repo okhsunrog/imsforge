@@ -138,6 +138,7 @@ name = "imsforge"
 version = "2.2.1"
 dependencies = [
  "clap",
+ "libc",
  "protobuf",
  "protobuf-codegen",
  "serde",
