@@ -46,6 +46,35 @@ It does **not** establish a new installed-module boot test or end-to-end IMS cal
 No telephony-cache deletion, module replacement, profile changes, UID exclusions or reboot of
 the real installation were needed for these isolated checks. Raw device dumps are not committed.
 
+## Installed boot verification, 2026-09-15
+
+After installing the fixed ZIP through `ksud` and rebooting:
+
+- All twelve installed runtime files matched the local build by SHA-256.
+- The boot report used format 2 and the current boot ID, with phase `applied`,
+  no error, `matches_run=true`, `product=ours` and `config_changed=false`.
+- The installer selected `system/product`; ZeroMount had an active VFS rule for
+  the generated `others.pb`. Its system-path SHA-256 matched the module output
+  and the previously verified patched hash above, while cached stock differed.
+- Root, ordinary shell and a diagnostic process with UID 1001 could read the
+  patched system-path bytes. The latter is not an exact replica of the live
+  telephony process's SELinux and namespace context.
+- The output had mode 0644 and `u:object_r:system_file:s0`. Boot and late-detection
+  logs showed successful processing; both SIM slots were saved with `complete=true`.
+- All eight sources in the installed probe returned zero exit codes.
+- MTS in slot 1 had all nineteen configured boolean overrides and the NR array
+  `[1, 2]` in the effective Android CarrierConfig, confirming consumption beyond
+  filesystem visibility. The explicit `tinkoff_ru` exclusion in slot 0 remained.
+- The current MTS ImsPhone reported MmTel registration state 2, in-service state
+  and Voice/Video/SMS capabilities. Its registration log and current IWLAN state
+  identify WLAN registration. The excluded slot had registration state 0 and no
+  MmTel capabilities, with IMS disabled by its platform configuration.
+
+This establishes successful installed-module boot, effective configuration and
+MTS IMS registration over Wi-Fi. A real call, LTE-only registration/call and VoNR
+remain separate acceptance checks; no call was placed by this verification.
+No profiles, ZeroMount UID exclusions or radio settings were changed.
+
 ## Compatibility and storage
 
 `patch --out DIR` replaces DIR as a whole; its default report is `DIR/.imsforge.json`.
