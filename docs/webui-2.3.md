@@ -31,5 +31,19 @@ status; P-CSCF and a different SIM's settings cannot establish registration.
 
 The ZIP is version 2.3.0, versionCode 9, built with the existing NDK 28.2 environment.
 Native patch behavior is unchanged from the boot- and call-tested implementation;
-only the package version changes in the native crate. A new installed-manager WebUI
-check remains separate from the browser and device-probe checks above.
+only the package version changes in the native crate.
+
+## Installed verification, 2026-09-15
+
+After physical confirmation of the KernelSU install and a user-initiated reboot:
+
+- All thirteen installed runtime files matched the 2.3.0 build.
+- The current boot report was applied, output matched and configuration was unchanged;
+  ZeroMount was active and both SIM slots were detected completely.
+- All nine probe sources returned zero. MTS was registered with voice capability;
+  the excluded slot was not registered. Last MTS registration transport was Wi-Fi.
+- Opened the installed module through KsuWebUI and visually checked the actual phone
+  screen: version 2.3.0, green applied/registered states and no idle action bar.
+- Toggled the MTS draft, verified Discard / Save changes appeared, then discarded it.
+  The action bar disappeared and the applied state returned. Nothing was saved;
+  the carrier configuration retained its pre-test SHA-256.
