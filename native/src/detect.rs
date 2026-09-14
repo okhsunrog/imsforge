@@ -4,18 +4,63 @@
 //! for MVNOs additionally by SPN, IMSI prefix or GID1. We replicate the MCCMNC and SPN halves,
 //! which covers the MVNOs that ship their own settings file.
 
+use crate::atomic;
 use crate::protos::carrier_list::{CarrierList, carrier_id::Mvno_data};
 use protobuf::Message;
+use std::fmt::{self, Display};
+use std::fs;
+use std::io;
 use std::path::Path;
+use std::process::Command;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
-#[derive(Debug)]
+/// How long to leave between two looks at the SIM properties while waiting for the modem.
+const POLL: Duration = Duration::from_secs(2);
+
+/// How many times in a row the properties must come back unchanged before they count as settled.
+/// The modem fills them one slot at a time, so a single usable-looking sample can still be a
+/// list with the second SIM missing from it.
+const STEADY: u32 = 2;
+
+/// One SIM slot, as the modem reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sim {
     pub mccmnc: String,
     pub spn: String,
 }
 
+/// A carrier we believe is in this phone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    /// The name CarrierSettings files it under.
+    pub canonical_name: String,
+    /// Operator name the SIM reports — empty when the modem was down when we looked. It travels
+    /// with the carrier because the IMS APN is labelled after it: CarrierSettings only names the
+    /// carriers Google supports, so for the rest a log line would read a bare "25001".
+    pub label: String,
+}
+
+impl Resolved {
+    pub fn new(canonical_name: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            canonical_name: canonical_name.into(),
+            label: label.into(),
+        }
+    }
+}
+
+impl Display for Resolved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.label.is_empty() {
+            true => f.write_str(&self.canonical_name),
+            false => write!(f, "{} ({})", self.label, self.canonical_name),
+        }
+    }
+}
+
 fn getprop(name: &str) -> String {
-    std::process::Command::new("getprop")
+    Command::new("getprop")
         .arg(name)
         .output()
         .ok()
@@ -44,16 +89,54 @@ pub fn pair_sims(numerics_raw: &str, names_raw: &str) -> Vec<Sim> {
     numerics
         .iter()
         .enumerate()
-        .filter(|(_, n)| !n.is_empty())
-        .map(|(i, mccmnc)| Sim {
+        .filter(|(_, mccmnc)| !mccmnc.is_empty())
+        .map(|(slot, mccmnc)| Sim {
             mccmnc: mccmnc.to_string(),
             spn: if aligned {
-                names[i].trim().to_string()
+                names[slot].trim().to_string()
             } else {
                 String::new()
             },
         })
         .collect()
+}
+
+/// Is this sample worth acting on?
+///
+/// Every slot has to carry both halves. A slot whose name has not arrived yet would have the IMS
+/// APN labelled after its MCCMNC for the whole boot, and a list whose two properties disagree in
+/// length makes [`pair_sims`] drop the names altogether rather than mis-pair them.
+fn usable(sims: &[Sim]) -> bool {
+    !sims.is_empty() && sims.iter().all(|sim| !sim.spn.is_empty())
+}
+
+/// The SIMs, once the modem has settled — or whatever is there when `limit` runs out.
+///
+/// At boot this runs from service.sh, late, while the modem is still coming up: the properties
+/// are filled in one slot and one field at a time, so a sample taken too early is empty, missing
+/// a SIM, or carrying one carrier's name against another's number.
+pub fn settled_sims(limit: Duration) -> Vec<Sim> {
+    let deadline = Instant::now() + limit;
+    let mut previous: Option<Vec<Sim>> = None;
+    let mut steady = 0;
+
+    loop {
+        let now = sims();
+        steady = if usable(&now) && previous.as_deref() == Some(now.as_slice()) {
+            steady + 1
+        } else {
+            0
+        };
+        if steady >= STEADY {
+            return now;
+        }
+        if Instant::now() + POLL > deadline {
+            eprintln!("the modem never settled; going with what it reports now");
+            return now;
+        }
+        previous = Some(now);
+        sleep(POLL);
+    }
 }
 
 /// Canonical CarrierSettings name for a SIM, preferring an MVNO entry whose SPN matches.
@@ -85,45 +168,46 @@ pub fn resolve(list: &CarrierList, sim: &Sim) -> Option<String> {
     generic
 }
 
-/// Canonical names taken from telephony's own carrier config cache.
+/// Carriers taken from telephony's own carrier config cache.
 ///
 /// At post-fs-data the modem is not up, so the SIM properties are empty and live detection is
 /// impossible. Telephony, however, leaves a cache file per SIM from the previous boot, and its
 /// `carrier_config_version_string` starts with exactly the canonical name we need — a record the
-/// system maintains for us. We read it before the cache is cleared.
-pub fn from_config_cache(dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+/// system maintains for us. We read it before the cache is cleared. It carries no operator name.
+pub fn from_config_cache(dir: &Path) -> Vec<Resolved> {
+    let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
+    let mut out: Vec<Resolved> = Vec::new();
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("carrierconfig-") || !name.ends_with(".xml") || name.contains("nosim")
-        {
+        if !is_carrier_config(&entry.file_name().to_string_lossy()) {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+        let Ok(text) = fs::read_to_string(entry.path()) else {
             continue;
         };
-        let Some(i) = text.find("carrier_config_version_string") else {
+        let Some(canonical) = version_string(&text).and_then(canonical_from_version) else {
             continue;
         };
-        // <string name="carrier_config_version_string">tinkoff_ru-77000000001.21&#10;…</string>
-        let rest = &text[i..];
-        let Some(start) = rest.find('>') else {
-            continue;
-        };
-        let Some(end) = rest[start..].find('<') else {
-            continue;
-        };
-        let value = &rest[start + 1..start + end];
-        if let Some(canonical) = canonical_from_version(value)
-            && !out.iter().any(|c| c == canonical)
-        {
-            out.push(canonical.to_string());
+        if !out.iter().any(|c| c.canonical_name == canonical) {
+            out.push(Resolved::new(canonical, ""));
         }
     }
     out
+}
+
+/// One of telephony's per-SIM cache files? The "nosim" one describes no carrier at all.
+fn is_carrier_config(name: &str) -> bool {
+    name.starts_with("carrierconfig-") && name.ends_with(".xml") && !name.contains("nosim")
+}
+
+/// The value of `<string name="carrier_config_version_string">…</string>`, read out of the cache
+/// XML by hand — pulling in an XML parser to reach one element would be a poor trade.
+fn version_string(xml: &str) -> Option<&str> {
+    let rest = &xml[xml.find("carrier_config_version_string")?..];
+    let open = rest.find('>')?;
+    let close = rest[open..].find('<')?;
+    Some(&rest[open + 1..open + close])
 }
 
 /// Pull the carrier's canonical name out of a carrier_config_version_string.
@@ -141,30 +225,64 @@ pub fn canonical_from_version(value: &str) -> Option<&str> {
 }
 
 /// Carriers saved by service.sh once telephony was up, as "<canonical>\t<operator name>".
-///
-/// The operator name has to travel with them: at boot the modem is down, so it cannot be looked
-/// up again, and without it the IMS APN would fall back to being labelled after the canonical
-/// name — "25001 IMS" instead of "МТС IMS".
-pub fn from_saved(path: &Path) -> Vec<(String, String)> {
-    std::fs::read_to_string(path)
-        .map(|t| t.lines().filter_map(parse_saved_line).collect())
+pub fn from_saved(path: &Path) -> Vec<Resolved> {
+    fs::read_to_string(path)
+        .map(|text| text.lines().filter_map(parse_saved_line).collect())
         .unwrap_or_default()
 }
 
-fn parse_saved_line(line: &str) -> Option<(String, String)> {
+/// Remember these for the next boot, when the modem will not be up in time. The mirror of
+/// [`from_saved`].
+pub fn save(path: &Path, carriers: &[Resolved]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let text: String = carriers
+        .iter()
+        .map(|c| format!("{}\t{}\n", c.canonical_name, c.label))
+        .collect();
+    atomic::write(path, text)
+}
+
+fn parse_saved_line(line: &str) -> Option<Resolved> {
     let line = line.trim();
     if line.is_empty() {
         return None;
     }
     Some(match line.split_once('\t') {
-        Some((name, spn)) => (name.to_string(), spn.trim().to_string()),
-        None => (line.to_string(), String::new()),
+        Some((name, label)) => Resolved::new(name, label.trim()),
+        None => Resolved::new(line, ""),
     })
+}
+
+/// Which carriers are in this phone, and how we found out.
+///
+/// Three sources, in order of quality. At post-fs-data the modem is not up yet, so the SIM
+/// properties are empty and only the last two work — which is the normal case for the boot-time
+/// run, not the exception.
+pub fn identify(src: &Path, sims_file: &Path, phone_files: &Path) -> (Vec<Resolved>, &'static str) {
+    if let Ok(list) = load_carrier_list(src) {
+        let live: Vec<Resolved> = sims()
+            .iter()
+            .filter_map(|sim| resolve(&list, sim).map(|name| Resolved::new(name, &sim.spn)))
+            .collect();
+        if !live.is_empty() {
+            return (live, "live SIM properties");
+        }
+    }
+    let saved = from_saved(sims_file);
+    if !saved.is_empty() {
+        return (saved, "saved by the previous boot");
+    }
+    (
+        from_config_cache(phone_files),
+        "telephony's own config cache",
+    )
 }
 
 pub fn load_carrier_list(dir: &Path) -> Result<CarrierList, String> {
     let path = dir.join("carrier_list.pb");
-    let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     CarrierList::parse_from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -184,13 +302,41 @@ mod tests {
             canonical_from_version("25001-77000000119.21"),
             Some("25001")
         );
-        // A canonical name may contain dashes of its own.
+        // A canonical name may contain dashes of its own. This one is a US carrier because a
+        // dash inside the name is what the case is about, and the Russian names above have none.
         assert_eq!(
             canonical_from_version("t-mobile_us-123.4"),
             Some("t-mobile_us")
         );
         assert_eq!(canonical_from_version(""), None);
         assert_eq!(canonical_from_version("no-version-here"), None);
+    }
+
+    #[test]
+    fn the_version_string_is_read_out_of_the_xml() {
+        let xml = r#"<?xml version='1.0'?>
+<map>
+  <string name="carrier_config_version_string">tinkoff_ru-77000000001.21&#10;2025-11-12</string>
+  <boolean name="carrier_volte_available_bool" value="true" />
+</map>"#;
+        assert_eq!(
+            version_string(xml),
+            Some("tinkoff_ru-77000000001.21&#10;2025-11-12")
+        );
+        assert_eq!(version_string("<map />"), None);
+    }
+
+    #[test]
+    fn only_the_per_sim_cache_files_are_read() {
+        assert!(is_carrier_config(
+            "carrierconfig-com.google.android.carrier-1839.xml"
+        ));
+        // Written when the slot is empty: it describes no carrier.
+        assert!(!is_carrier_config(
+            "carrierconfig-com.google.android.carrier-nosim-1839.xml"
+        ));
+        assert!(!is_carrier_config("carrierconfig-something.txt"));
+        assert!(!is_carrier_config("preferred-apn.xml"));
     }
 
     #[test]
@@ -217,14 +363,49 @@ mod tests {
     fn saved_lines_carry_the_operator_name() {
         assert_eq!(
             parse_saved_line("25001\tМТС"),
-            Some(("25001".into(), "МТС".into()))
+            Some(Resolved::new("25001", "МТС"))
         );
         // Written by an older version, before the name travelled with it.
         assert_eq!(
             parse_saved_line("tinkoff_ru"),
-            Some(("tinkoff_ru".into(), String::new()))
+            Some(Resolved::new("tinkoff_ru", ""))
         );
         assert_eq!(parse_saved_line("  "), None);
+    }
+
+    #[test]
+    fn what_is_saved_is_what_comes_back() {
+        let path = std::env::temp_dir().join(format!("imsforge-sims-{}", std::process::id()));
+        let carriers = vec![
+            Resolved::new("25001", "МТС"),
+            Resolved::new("tinkoff_ru", ""),
+        ];
+
+        save(&path, &carriers).unwrap();
+        assert_eq!(from_saved(&path), carriers);
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_sample_is_only_acted_on_once_every_slot_is_complete() {
+        assert!(usable(&pair_sims("25001", "МТС")));
+        assert!(usable(&pair_sims("25062,25001", "T-Mobile,МТС")));
+        // Nothing reported yet.
+        assert!(!usable(&pair_sims("", "")));
+        // The number is there, the name has not arrived: patching now would label the IMS APN
+        // "25001 IMS" for the whole boot.
+        assert!(!usable(&pair_sims("25001", "")));
+        // Both properties are filled in, but they disagree in length, so pair_sims dropped the
+        // names rather than pair them wrongly — same outcome, one boot with no labels.
+        assert!(!usable(&pair_sims("25062,25001", "T-Mobile")));
+    }
+
+    #[test]
+    fn a_carrier_reads_as_its_operator_name() {
+        assert_eq!(Resolved::new("25001", "МТС").to_string(), "МТС (25001)");
+        // Nothing to say it better with: Google names an unsupported carrier after its MCCMNC.
+        assert_eq!(Resolved::new("25001", "").to_string(), "25001");
     }
 
     #[test]

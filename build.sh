@@ -9,6 +9,16 @@ TARGET=${TARGET:-aarch64-linux-android}
 DIST=dist
 STAGE=$DIST/module
 
+# The zip announces its version from module.prop and the binary reports its own from Cargo.toml.
+# Nothing keeps the two in step, so a release can otherwise ship a module that calls itself one
+# version while `imsforge --version` says another.
+PROP_VERSION=$(sed -n 's/^version=//p' module/module.prop)
+CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' native/Cargo.toml | head -1)
+[ "$PROP_VERSION" = "v$CARGO_VERSION" ] || {
+    echo "version mismatch: module.prop says $PROP_VERSION, Cargo.toml says $CARGO_VERSION" >&2
+    exit 1
+}
+
 command -v cargo-ndk >/dev/null || {
     echo "cargo-ndk is missing: cargo install cargo-ndk" >&2
     exit 1
@@ -39,5 +49,7 @@ ZIP=$DIST/imsforge.zip
 rm -f "$ZIP"
 (cd "$STAGE" && zip -qr "../${ZIP#"$DIST"/}" .)
 
-echo "==> $ZIP ($(du -h "$ZIP" | cut -f1))"
+# --apparent-size, or a compressing filesystem (zfs, btrfs) reports the blocks it managed to
+# squeeze the zip into rather than the size the zip actually is.
+echo "==> $ZIP ($(du -h --apparent-size "$ZIP" | cut -f1))"
 unzip -l "$ZIP" | tail -n +4 | head -n -2

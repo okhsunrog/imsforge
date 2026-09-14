@@ -29,13 +29,17 @@ set_perm "$MODPATH/bin/imsforge" 0 0 0755
 # thing that remembers carriers across a reboot — may not have an entry for every SIM yet. Without
 # this the first boot can silently leave a SIM unpatched.
 mkdir -p /data/adb/imsforge
-if "$MODPATH/bin/imsforge" detect --save > /dev/null 2>&1; then
+# The patcher names what it saved on stderr, which is what is caught here; the JSON on stdout is
+# of no use to an installer. Reading the saved file instead would be a third place that has to
+# know how that file is written.
+# shellcheck disable=SC2069  # deliberate: stderr to the capture, stdout away
+if carriers=$("$MODPATH/bin/imsforge" detect --save 2>&1 >/dev/null) && [ -n "$carriers" ]; then
     ui_print "- Carriers detected:"
-    while IFS="$(printf '\t')" read -r name spn; do
-        [ -n "$name" ] && ui_print "    ${spn:-$name} ($name)"
-    done < /data/adb/imsforge/sims
+    echo "$carriers" | while IFS= read -r line; do
+        ui_print "    $line"
+    done
 else
-    ui_print "! Could not read the SIMs now; the first boot may need a second reboot."
+    ui_print "! No SIM could be read now; the first boot may need a second reboot."
 fi
 
 ui_print "- Installed. Reboot to apply."

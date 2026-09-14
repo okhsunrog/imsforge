@@ -5,18 +5,39 @@
 //! post-fs-data.sh, this re-derives the patch from whatever Google shipped on this boot, so an OS
 //! update can never leave a stale snapshot behind.
 
+mod atomic;
+mod cache;
 mod config;
 mod detect;
 mod patch;
+mod plan;
+mod status;
+#[cfg(test)]
+mod testing;
 
 mod protos {
     include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
 }
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use config::{Carrier, Config};
+use detect::Resolved;
+use plan::Stock;
+use status::{Source, Status};
+use std::fmt::Display;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
+
+// The defaults, in one place: three subcommands name the same carriers.json, and a copy that
+// drifts would send one of them to a file nobody else writes.
+const STOCK_DIR: &str = "/product/etc/CarrierSettings";
+const STOCK_CACHE: &str = "/data/adb/imsforge/stock";
+const CONFIG: &str = "/data/adb/imsforge/carriers.json";
+const SIMS: &str = "/data/adb/imsforge/sims";
+const STATUS: &str = "/data/adb/imsforge/status.json";
+const PHONE_FILES: &str = "/data/user_de/0/com.android.phone/files";
 
 #[derive(Parser)]
 #[command(name = "imsforge", version, about, long_about = None)]
@@ -28,286 +49,114 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Patch the CarrierSettings protobufs into a directory
-    Patch {
-        /// Where to write the patched protobufs
-        #[arg(long, value_name = "DIR")]
-        out: PathBuf,
-
-        #[command(flatten)]
-        paths: Paths,
-    },
+    Patch(PatchArgs),
     /// Print, as JSON, what the inserted SIMs resolve to
-    Detect {
-        /// Remember the carriers for the next boot, when the modem will not be up in time
-        #[arg(long)]
-        save: bool,
-
-        #[command(flatten)]
-        paths: Paths,
-    },
+    Detect(DetectArgs),
+    /// Parse a carriers.json and report what it holds, changing nothing
+    Check(CheckArgs),
+    /// Print, as JSON, what the last patch decided and whose files are at /product now
+    Status(StatusArgs),
 }
 
-#[derive(clap::Args)]
-struct Paths {
+/// Where the CarrierSettings come from: the live directory, and our own copy of what Google
+/// shipped there — which is what a run has to fall back on once it has shadowed the original.
+#[derive(Args)]
+struct Sources {
     /// Stock CarrierSettings directory
-    #[arg(
-        long,
-        value_name = "DIR",
-        default_value = "/product/etc/CarrierSettings"
-    )]
+    #[arg(long, value_name = "DIR", default_value = STOCK_DIR)]
     src: PathBuf,
 
+    /// Our copy of the stock protobufs, for runs that can no longer see them
+    #[arg(long, value_name = "DIR", default_value = STOCK_CACHE)]
+    stock_cache: PathBuf,
+}
+
+#[derive(Args)]
+struct PatchArgs {
+    /// Where to write the patched protobufs
+    #[arg(long, value_name = "DIR")]
+    out: PathBuf,
+
+    #[command(flatten)]
+    sources: Sources,
+
     /// Carrier overrides
-    #[arg(
-        long,
-        value_name = "FILE",
-        default_value = "/data/adb/imsforge/carriers.json"
-    )]
+    #[arg(long, value_name = "FILE", default_value = CONFIG)]
     config: PathBuf,
 
-    /// Copy of the stock protobufs, for runs that can no longer see them
-    #[arg(long, value_name = "DIR", default_value = "/data/adb/imsforge/stock")]
-    cache: PathBuf,
-
-    /// Carriers remembered for the next boot
-    #[arg(long, value_name = "FILE", default_value = "/data/adb/imsforge/sims")]
+    /// Carriers remembered by the previous boot
+    #[arg(long, value_name = "FILE", default_value = SIMS)]
     sims: PathBuf,
 
+    /// Where to record what this run decided, for the WebUI to read
+    #[arg(long, value_name = "FILE", default_value = STATUS)]
+    status: PathBuf,
+
     /// Telephony's config cache, read to identify carriers when the modem is down
-    #[arg(
-        long,
-        value_name = "DIR",
-        default_value = "/data/user_de/0/com.android.phone/files"
-    )]
+    #[arg(long, value_name = "DIR", default_value = PHONE_FILES)]
     phone_files: PathBuf,
 }
 
-/// Cheap content fingerprint (FNV-1a). Only ever compared against one we wrote ourselves, so it
-/// needs no cryptographic strength — and no dependency.
-fn fingerprint(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100_0000_01b3);
-    }
-    h
+#[derive(Args)]
+struct DetectArgs {
+    /// Remember the carriers for the next boot, when the modem will not be up in time
+    #[arg(long)]
+    save: bool,
+
+    /// Wait up to this long for the modem to finish reporting the SIMs
+    #[arg(long, value_name = "SECONDS", default_value_t = 0)]
+    wait: u64,
+
+    /// Stock CarrierSettings directory, read for carrier_list.pb
+    #[arg(long, value_name = "DIR", default_value = STOCK_DIR)]
+    src: PathBuf,
+
+    /// Carrier overrides, read for the auto flag the WebUI shows
+    #[arg(long, value_name = "FILE", default_value = CONFIG)]
+    config: PathBuf,
+
+    /// Where --save writes what it found
+    #[arg(long, value_name = "FILE", default_value = SIMS)]
+    sims: PathBuf,
 }
 
-/// Where to read the stock protobufs from.
-///
-/// At boot we run before the mount backend, so /product still holds Google's originals. Run by
-/// hand later, /product shows our own patched files instead — and reading those would make the
-/// "has Google already certified this carrier" check see our own work and skip everything.
-///
-/// So each successful run records the fingerprint of what it produced. If the live file matches
-/// that, we are looking at ourselves and read the cached stock instead.
-fn effective_src(src: &Path, cache: &Path) -> PathBuf {
-    let Ok(live) = std::fs::read(src.join("others.pb")) else {
-        return src.to_path_buf();
+#[derive(Args)]
+struct CheckArgs {
+    /// The file to parse
+    #[arg(long, value_name = "FILE", default_value = CONFIG)]
+    config: PathBuf,
+}
+
+#[derive(Args)]
+struct StatusArgs {
+    #[command(flatten)]
+    sources: Sources,
+
+    /// The record the last patch left
+    #[arg(long, value_name = "FILE", default_value = STATUS)]
+    status: PathBuf,
+}
+
+/// Attach the path to an error. The module's log is the only thing the user ever sees, and a
+/// bare "No such file or directory" there names nothing.
+pub fn at<E: Display>(path: &Path) -> impl FnOnce(E) -> String + '_ {
+    move |e| format!("{}: {e}", path.display())
+}
+
+fn cmd_detect(args: &DetectArgs) -> Result<(), String> {
+    let cfg = Config::load(&args.config)?;
+    let list = detect::load_carrier_list(&args.src)?;
+    let sims = match args.wait {
+        0 => detect::sims(),
+        seconds => detect::settled_sims(Duration::from_secs(seconds)),
     };
-    let ours = std::fs::read_to_string(cache.join("output.fingerprint"))
-        .ok()
-        .and_then(|t| t.trim().parse::<u64>().ok());
-    if ours == Some(fingerprint(&live)) && cache.join("others.pb").exists() {
-        return cache.to_path_buf();
-    }
-    src.to_path_buf()
-}
 
-/// Keep a copy of the stock inputs plus the fingerprint of our output, so a later manual run has
-/// something truthful to read and can tell our work from Google's.
-fn refresh_cache(src: &Path, cache: &Path, names: &[String], output: &[u8]) {
-    if let Err(e) = std::fs::create_dir_all(cache) {
-        eprintln!("  cache: {e}");
-        return;
-    }
-    let mut files = vec!["others.pb".to_string()];
-    files.extend(names.iter().map(|n| format!("{n}.pb")));
-    for name in files {
-        let from = src.join(&name);
-        let to = cache.join(&name);
-        // Copying a file onto itself truncates it to nothing, so a run pointed at its own cache
-        // would destroy the very stock it is meant to preserve.
-        if from.exists() && !same_file(&from, &to) {
-            let _ = std::fs::copy(&from, &to);
-        }
-    }
-    let _ = std::fs::write(
-        cache.join("output.fingerprint"),
-        fingerprint(output).to_string(),
-    );
-}
-
-fn same_file(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
-}
-
-/// Why a carrier ends up in the patch list, or why it does not. Pulled out of the I/O so the
-/// rule that protects a carrier Google already supports can be tested on its own.
-fn decide(name: &str, cfg: &Config, certified: bool) -> Option<&'static str> {
-    if cfg.skip.iter().any(|s| s == name) {
-        return None;
-    }
-    if cfg.carriers.iter().any(|c| c.canonical_name == name) {
-        // An explicit entry is a deliberate request and outranks the safety check.
-        return Some("configured");
-    }
-    if !cfg.auto || certified {
-        return None;
-    }
-    Some("detected")
-}
-
-struct Target {
-    carrier: Carrier,
-    reason: &'static str,
-    /// Operator name the SIM reports, for logging. CarrierSettings identifies a carrier by a
-    /// canonical name that Google only bothered to make readable for the carriers it supports —
-    /// for the rest the entry is called by its MCCMNC, so a log line of bare "25001" tells the
-    /// reader nothing.
-    label: String,
-}
-
-/// Default the IMS APN label to the carrier name the SIM reports.
-///
-/// Purely cosmetic — the APN works off its value and type, not its label — but without it the
-/// entry shows up in Settings as "25001 IMS" next to Google's own "MTS Internet" and "MTS MMS",
-/// which reads like a glitch.
-fn name_apns(targets: &mut [Target], sims: &[(String, String)]) {
-    for t in targets.iter_mut() {
-        if let Some((_, spn)) = sims
-            .iter()
-            .find(|(name, spn)| *name == t.carrier.canonical_name && !spn.is_empty())
-        {
-            t.label = spn.clone();
-        }
-        if !t.carrier.ims_apn_name.is_empty() {
-            continue;
-        }
-        if !t.label.is_empty() {
-            t.carrier.ims_apn_name = format!("{} IMS", t.label);
-        }
-    }
-}
-
-/// Targets to patch, plus every carrier we considered — the cache needs the stock files of the
-/// skipped ones too, or a later run has nothing to judge them by.
-fn targets(
-    cfg: &Config,
-    data_src: &Path,
-    paths: &Paths,
-) -> Result<(Vec<Target>, Vec<String>), String> {
-    // Which carriers are in this phone? Three sources, in order of quality.
-    //
-    // At post-fs-data the modem is not up yet, so the SIM properties are empty and only the last
-    // two work — which is the normal case for the boot-time run, not the exception.
-    let mut resolved: Vec<(String, String)> = Vec::new();
-    let mut source = "live SIM properties";
-    if let Ok(list) = detect::load_carrier_list(&paths.src) {
-        for sim in detect::sims() {
-            if let Some(name) = detect::resolve(&list, &sim) {
-                resolved.push((name, sim.spn));
-            }
-        }
-    }
-    if resolved.is_empty() {
-        resolved = detect::from_saved(&paths.sims);
-        source = "saved by the previous boot";
-    }
-    if resolved.is_empty() {
-        resolved = detect::from_config_cache(&paths.phone_files)
-            .into_iter()
-            .map(|n| (n, String::new()))
-            .collect();
-        source = "telephony's own config cache";
-    }
-    if !resolved.is_empty() {
-        println!("  carriers in this phone, from {source}");
-    }
-
-    let mut targets: Vec<Target> = cfg
-        .carriers
-        .iter()
-        .filter(|c| !cfg.skip.contains(&c.canonical_name))
-        .map(|c| Target {
-            carrier: c.clone(),
-            reason: "configured",
-            label: String::new(),
-        })
-        .collect();
-
-    let mut candidates: Vec<String> = resolved.iter().map(|(n, _)| n.clone()).collect();
-    for name in cfg
-        .carriers
-        .iter()
-        .map(|c| &c.canonical_name)
-        .chain(cfg.skip.iter())
-    {
-        if !candidates.contains(name) {
-            candidates.push(name.clone());
-        }
-    }
-
-    if !cfg.auto || resolved.is_empty() {
-        if resolved.is_empty() {
-            eprintln!("  no carriers identified — nothing to detect automatically");
-        }
-        name_apns(&mut targets, &resolved);
-        return Ok((targets, candidates));
-    }
-
-    let others_bytes =
-        std::fs::read(data_src.join("others.pb")).map_err(|e| format!("others.pb: {e}"))?;
-    let others = patch::parse_others(&others_bytes).map_err(|e| format!("others.pb: {e}"))?;
-
-    for (name, _) in resolved.clone() {
-        if targets.iter().any(|t| t.carrier.canonical_name == name) {
-            continue;
-        }
-
-        // The carrier's settings live either in its own file or inside others.pb.
-        let own = data_src.join(format!("{name}.pb"));
-        let enabled = if own.exists() {
-            let bytes = std::fs::read(&own).map_err(|e| format!("{}: {e}", own.display()))?;
-            patch::volte_enabled(&patch::parse_single(&bytes).map_err(|e| e.to_string())?)
-        } else {
-            match others.setting.iter().find(|s| s.canonical_name() == name) {
-                Some(settings) => patch::volte_enabled(settings),
-                None => {
-                    eprintln!("  {name}: no CarrierSettings entry, skipping");
-                    continue;
-                }
-            }
-        };
-
-        match decide(&name, cfg, enabled) {
-            Some(reason) => targets.push(Target {
-                carrier: Carrier::new(name),
-                reason,
-                label: String::new(),
-            }),
-            None if enabled => {
-                println!("  {name}: VoLTE already enabled by Google, leaving alone")
-            }
-            None => {}
-        }
-    }
-    name_apns(&mut targets, &resolved);
-    Ok((targets, candidates))
-}
-
-fn cmd_detect(paths: &Paths, save: bool) -> Result<(), String> {
-    let cfg = Config::load(&paths.config)?;
-    let list = detect::load_carrier_list(&paths.src)?;
     let mut items = Vec::new();
-    let mut lines = Vec::new();
-    for sim in detect::sims() {
+    let mut found: Vec<Resolved> = Vec::new();
+    for sim in sims {
         let name = detect::resolve(&list, &sim);
-        if let Some(n) = &name {
-            lines.push(format!("{n}\t{}", sim.spn));
+        if let Some(name) = &name {
+            found.push(Resolved::new(name.clone(), sim.spn.clone()));
         }
         items.push(serde_json::json!({
             "mccmnc": sim.mccmnc,
@@ -317,96 +166,172 @@ fn cmd_detect(paths: &Paths, save: bool) -> Result<(), String> {
     }
     // Serialised properly rather than by hand: an operator name carrying a quote or a backslash
     // would otherwise produce JSON the WebUI cannot parse, and it would show "no SIM detected".
-    let report = serde_json::json!({ "auto": cfg.auto, "sims": items });
-    println!("{report}");
+    println!("{}", serde_json::json!({ "auto": cfg.auto, "sims": items }));
 
     // Persist the mapping for the next boot, when the modem will not be up in time.
-    if save && !lines.is_empty() {
-        if let Some(dir) = paths.sims.parent() {
-            let _ = std::fs::create_dir_all(dir);
+    if args.save && !found.is_empty() {
+        detect::save(&args.sims, &found).map_err(at(&args.sims))?;
+        // On stderr, where it cannot disturb the JSON: the installer shows these lines to the
+        // user, and reading them back out of the saved file would be a third place that has to
+        // know how that file is written.
+        for carrier in &found {
+            eprintln!("{carrier}");
         }
-        std::fs::write(&paths.sims, lines.join("\n") + "\n")
-            .map_err(|e| format!("{}: {e}", paths.sims.display()))?;
     }
     Ok(())
 }
 
-fn cmd_patch(out: &Path, paths: &Paths) -> Result<(), String> {
-    let cfg = Config::load(&paths.config)?;
+/// Parse a configuration and say what it holds.
+///
+/// The WebUI writes carriers.json from a free-form editor, and `deny_unknown_fields` means one
+/// misspelled key stops the next boot from patching anything at all. Far better to find that out
+/// here, while the file that works is still in place, than from a log line after a reboot.
+fn cmd_check(args: &CheckArgs) -> Result<(), String> {
+    let text = fs::read_to_string(&args.config).map_err(at(&args.config))?;
+    let cfg = Config::parse(&text).map_err(at(&args.config))?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "auto": cfg.auto,
+            "carriers": cfg.carriers.len(),
+            "skip": cfg.skip.len(),
+        })
+    );
+    Ok(())
+}
 
-    let src = effective_src(&paths.src, &paths.cache);
-    if src != paths.src {
+/// What the last patch decided, plus whose CarrierSettings is at /product now.
+///
+/// The record is passed through as it was written rather than parsed: a WebUI from another
+/// release should see the fields it knows, and this has no reason to understand them.
+fn cmd_status(args: &StatusArgs) -> Result<(), String> {
+    let run = fs::read_to_string(&args.status)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .unwrap_or(serde_json::Value::Null);
+    println!(
+        "{}",
+        serde_json::json!({
+            "product": cache::product(&args.sources.src, &args.sources.stock_cache),
+            "run": run,
+        })
+    );
+    Ok(())
+}
+
+fn cmd_patch(args: &PatchArgs) -> Result<(), String> {
+    let out = &args.out;
+    let cfg = Config::load(&args.config)?;
+
+    let src = cache::effective_src(&args.sources.src, &args.sources.stock_cache);
+    let source = if src == args.sources.src {
+        Source::Stock
+    } else {
         println!("  /product is already shadowed by us, reading the cached stock instead");
+        Source::Cache
+    };
+
+    // Parsed once and used by both halves: deciding needs it to tell a carrier Google supports
+    // from one it forgot, and patching rewrites it.
+    let others_path = src.join("others.pb");
+    let others_bytes = fs::read(&others_path).map_err(at(&others_path))?;
+    let others = patch::parse_others(&others_bytes).map_err(at(&others_path))?;
+
+    // Which carriers are in this phone is a question about the phone, not about the patch, so
+    // it is answered here and handed over.
+    let (present, from) = detect::identify(&args.sources.src, &args.sims, &args.phone_files);
+    if present.is_empty() {
+        eprintln!("  no carriers identified — nothing to detect automatically");
+    } else {
+        println!("  carriers in this phone, from {from}");
     }
-    let (targets, candidates) = targets(&cfg, &src, paths)?;
-    if targets.is_empty() {
+
+    let plan = plan::plan(&cfg, &Stock::new(&src, &others), &present)?;
+    if plan.targets.is_empty() {
         println!("nothing to patch");
+        // Still recorded: without it the WebUI would go on showing what some earlier boot
+        // patched, while this boot left /product as Google shipped it.
+        write_status(&args.status, Status::new(source, plan.left_alone));
         return Ok(());
     }
-    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-
-    for t in &targets {
-        let who = if t.label.is_empty() {
-            t.carrier.canonical_name.clone()
-        } else {
-            format!("{} ({})", t.label, t.carrier.canonical_name)
-        };
-        println!("  {who} — {}", t.reason);
+    fs::create_dir_all(out).map_err(at(out))?;
+    for target in &plan.targets {
+        println!("  {target}");
     }
-    let carriers: Vec<Carrier> = targets.into_iter().map(|t| t.carrier).collect();
-
-    let bytes = std::fs::read(src.join("others.pb")).map_err(|e| format!("others.pb: {e}"))?;
-    let parsed = patch::parse_others(&bytes).map_err(|e| format!("others.pb: {e}"))?;
-    let (patched_others, reports) =
-        patch::patch_others(parsed, &carriers).map_err(|e| format!("others.pb: {e}"))?;
-    std::fs::write(out.join("others.pb"), &patched_others)
-        .map_err(|e| format!("others.pb: {e}"))?;
+    let carriers: Vec<Carrier> = plan.targets.iter().map(|t| t.carrier.clone()).collect();
 
     let mut changed: usize = 0;
-    for r in &reports {
-        changed += r.keys_written + usize::from(r.apn.starts_with("added"));
+    let (patched_others, reports) =
+        patch::patch_others(others, &carriers).map_err(at(&others_path))?;
+    let mut reported: Vec<patch::Report> = Vec::new();
+    let dest = out.join("others.pb");
+    fs::write(&dest, &patched_others).map_err(at(&dest))?;
+    for report in &reports {
+        changed += report.changes();
         println!(
             "others.pb [{}]: {} keys, IMS APN: {}",
-            r.canonical_name, r.keys_written, r.apn
+            report.canonical_name, report.keys_written, report.apn
         );
     }
+    reported.extend(reports);
 
     for carrier in &carriers {
-        let path = src.join(format!("{}.pb", carrier.canonical_name));
+        let name = format!("{}.pb", carrier.canonical_name);
+        let path = src.join(&name);
         if !path.exists() {
             continue;
         }
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let parsed = patch::parse_single(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-        let (patched, report) =
-            patch::patch_single(parsed, carrier).map_err(|e| format!("{}: {e}", path.display()))?;
-        std::fs::write(out.join(path.file_name().unwrap()), &patched)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        changed += report.keys_written + usize::from(report.apn.starts_with("added"));
+        let bytes = fs::read(&path).map_err(at(&path))?;
+        let parsed = patch::parse_single(&bytes).map_err(at(&path))?;
+        let (patched, report) = patch::patch_single(parsed, carrier).map_err(at(&path))?;
+        let dest = out.join(&name);
+        fs::write(&dest, &patched).map_err(at(&dest))?;
+        changed += report.changes();
         println!(
-            "{}.pb: {} keys, IMS APN: {}",
-            carrier.canonical_name, report.keys_written, report.apn
+            "{name}: {} keys, IMS APN: {}",
+            report.keys_written, report.apn
         );
+        reported.push(report);
     }
+
+    write_status(
+        &args.status,
+        Status::new(source, plan::record(&plan, &reported)),
+    );
 
     // A run that changed nothing means the source already carried our patch — that is, we were
     // reading our own output, not the stock files. Caching that would poison the cache with
     // patched data masquerading as stock, so only refresh when the patch actually did something.
-    if src == paths.src {
+    if src == args.sources.src {
         if changed == 0 {
             println!("  source is already patched, keeping the existing stock cache");
         } else {
-            refresh_cache(&src, &paths.cache, &candidates, &patched_others);
+            cache::refresh(
+                &src,
+                &args.sources.stock_cache,
+                &plan.candidates,
+                &patched_others,
+            );
         }
     }
     Ok(())
+}
+
+/// A record we could not write is worth a line in the log and nothing more: the patch itself
+/// succeeded, and failing the run over it would keep the phone on the stock config.
+fn write_status(path: &Path, status: Status) {
+    if let Err(e) = status.write(path) {
+        eprintln!("  status: {e}");
+    }
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match &cli.command {
-        Command::Patch { out, paths } => cmd_patch(out, paths),
-        Command::Detect { save, paths } => cmd_detect(paths, *save),
+        Command::Patch(args) => cmd_patch(args),
+        Command::Detect(args) => cmd_detect(args),
+        Command::Check(args) => cmd_check(args),
+        Command::Status(args) => cmd_status(args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -420,88 +345,101 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::patch::stock_settings;
+    use crate::protos::carrier_settings::MultiCarrierSettings;
+    use crate::testing::tempdir;
 
-    #[test]
-    fn refreshing_a_cache_onto_itself_keeps_the_data() {
-        // Pointing a run at its own cache is nonsense, but it must not cost the user their copy
-        // of the stock: std::fs::copy truncates when source and destination are the same file.
-        let dir = std::env::temp_dir().join(format!("imsforge-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("others.pb");
-        std::fs::write(&file, b"stock bytes").unwrap();
+    /// A patch run over a scratch directory, with every path pointing into it.
+    fn args_in(dir: &Path) -> PatchArgs {
+        PatchArgs {
+            out: dir.join("out"),
+            sources: Sources {
+                src: dir.join("product"),
+                stock_cache: dir.join("stock"),
+            },
+            config: dir.join("carriers.json"),
+            sims: dir.join("sims"),
+            status: dir.join("status.json"),
+            phone_files: dir.join("phone"),
+        }
+    }
 
-        refresh_cache(&dir, &dir, &[], b"output");
-
-        assert_eq!(std::fs::read(&file).unwrap(), b"stock bytes");
-        std::fs::remove_dir_all(&dir).ok();
+    /// Google's own file, on disk, as a run would find it. Returns the bytes it wrote.
+    fn write_stock(dir: &Path, carriers: &[(&str, bool)]) -> Vec<u8> {
+        let mut multi = MultiCarrierSettings::new();
+        for (name, volte) in carriers {
+            multi.setting.push(stock_settings(name, *volte));
+        }
+        let bytes = protobuf::Message::write_to_bytes(&multi).unwrap();
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("others.pb"), &bytes).unwrap();
+        bytes
     }
 
     #[test]
-    fn the_fingerprint_tells_our_output_apart() {
-        assert_eq!(fingerprint(b"a"), fingerprint(b"a"));
-        assert_ne!(fingerprint(b"a"), fingerprint(b"b"));
-    }
-}
+    fn the_cached_stock_survives_a_run_that_reads_our_own_output() {
+        let dir = tempdir("run");
+        let args = args_in(&dir);
+        let stock_bytes = write_stock(&args.sources.src, &[("25001", false)]);
+        fs::write(&args.sims, "25001\tМТС\n").unwrap();
 
-#[cfg(test)]
-mod decision_tests {
-    use super::*;
+        cmd_patch(&args).unwrap();
+        let patched = fs::read(args.out.join("others.pb")).unwrap();
+        assert_ne!(patched, stock_bytes, "the run must have changed something");
+        assert_eq!(
+            fs::read(args.sources.stock_cache.join("others.pb")).unwrap(),
+            stock_bytes,
+            "the stock file is kept for later runs"
+        );
 
-    fn cfg(json: &str) -> Config {
-        serde_json::from_str(json).unwrap()
-    }
+        // The mount backend now lays that output over /product, so a run by hand sees our own
+        // work where Google's files used to be.
+        fs::write(args.sources.src.join("others.pb"), &patched).unwrap();
+        let again = PatchArgs {
+            out: dir.join("out-again"),
+            ..args_in(&dir)
+        };
+        cmd_patch(&again).unwrap();
 
-    #[test]
-    fn a_carrier_google_supports_is_left_alone() {
-        let c = cfg("{}");
-        assert_eq!(decide("25001", &c, false), Some("detected"));
-        assert_eq!(decide("25001", &c, true), None);
-    }
-
-    #[test]
-    fn an_explicit_entry_outranks_the_safety_check() {
-        // Asking for a carrier by name is a deliberate act; the guard exists to stop detection
-        // from touching a curated config, not to overrule the user.
-        let c = cfg(r#"{"carriers":[{"canonical_name":"25001"}]}"#);
-        assert_eq!(decide("25001", &c, true), Some("configured"));
-    }
-
-    #[test]
-    fn skip_beats_everything() {
-        let c = cfg(r#"{"carriers":[{"canonical_name":"x"}],"skip":["x"]}"#);
-        assert_eq!(decide("x", &c, false), None);
-    }
-
-    #[test]
-    fn auto_off_leaves_detection_out_of_it() {
-        let c = cfg(r#"{"auto":false}"#);
-        assert_eq!(decide("25001", &c, false), None);
-
-        let explicit = cfg(r#"{"auto":false,"carriers":[{"canonical_name":"25001"}]}"#);
-        assert_eq!(decide("25001", &explicit, false), Some("configured"));
+        assert_eq!(
+            fs::read(again.out.join("others.pb")).unwrap(),
+            patched,
+            "reading the cached stock must reproduce the same patch, not build on it"
+        );
+        assert_eq!(
+            fs::read(args.sources.stock_cache.join("others.pb")).unwrap(),
+            stock_bytes,
+            "the cache must still hold Google's file"
+        );
     }
 
     #[test]
-    fn the_cache_is_used_when_the_live_file_is_our_own_output() {
-        let dir = std::env::temp_dir().join(format!("imsforge-src-{}", std::process::id()));
-        let cache = std::env::temp_dir().join(format!("imsforge-cache-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::create_dir_all(&cache).unwrap();
-        std::fs::write(dir.join("others.pb"), b"patched").unwrap();
-        std::fs::write(cache.join("others.pb"), b"stock").unwrap();
+    fn a_source_that_already_carries_the_patch_is_never_cached_as_stock() {
+        let dir = tempdir("poison");
+        let args = args_in(&dir);
+        let stock_bytes = write_stock(&args.sources.src, &[("25001", false)]);
+        // An explicit entry outranks the certification guard, so this run has a target even
+        // when the source already has every key set — which is what makes it reach the guard.
+        fs::write(&args.config, r#"{"carriers":[{"canonical_name":"25001"}]}"#).unwrap();
 
-        // No fingerprint yet: the live file is taken at face value.
-        assert_eq!(effective_src(&dir, &cache), dir);
+        cmd_patch(&args).unwrap();
+        let patched = fs::read(args.out.join("others.pb")).unwrap();
 
-        // Once it matches what we produced, reading it would mean reading ourselves.
-        std::fs::write(
-            cache.join("output.fingerprint"),
-            fingerprint(b"patched").to_string(),
-        )
+        // A run that cannot recognise its own work: the fingerprint is gone and /product carries
+        // the patch already. Copying that into the cache would leave patched data masquerading
+        // as Google's, and every later run would judge carriers by it.
+        fs::remove_file(args.sources.stock_cache.join("output.fingerprint")).unwrap();
+        fs::write(args.sources.src.join("others.pb"), &patched).unwrap();
+        cmd_patch(&PatchArgs {
+            out: dir.join("out-again"),
+            ..args_in(&dir)
+        })
         .unwrap();
-        assert_eq!(effective_src(&dir, &cache), cache);
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&cache).ok();
+        assert_eq!(
+            fs::read(args.sources.stock_cache.join("others.pb")).unwrap(),
+            stock_bytes,
+            "the cache must still hold Google's file"
+        );
     }
 }

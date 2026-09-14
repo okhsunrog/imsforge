@@ -18,17 +18,42 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          components: rustfmt, clippy
           targets: aarch64-linux-android
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
 
+      # The module announces its version to the manager from module.prop, and build.sh already
+      # refuses to build when that disagrees with Cargo.toml. The tag is the third name for the
+      # same thing, and the only one a release can be published under.
+      - name: Check the tag against the module version
+        run: |
+          prop=$(sed -n 's/^version=//p' module/module.prop)
+          if [ "$prop" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match module.prop ($prop)" >&2
+            exit 1
+          fi
+
       # The same gates as ci.yml: a tag should never produce an artifact the branch would have
       # rejected.
+      - name: Format
+        working-directory: native
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: native
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Test
         working-directory: native
         run: cargo test
+
+      - name: Shellcheck
+        run: |
+          shellcheck -s sh module/*.sh
+          shellcheck build.sh
 
       - uses: taiki-e/install-action@v2
         with:

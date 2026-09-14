@@ -59,3 +59,8 @@ jobs:
         run: |
           shellcheck -s sh module/*.sh
           shellcheck build.sh
+
+      # Nothing else ever loads the WebUI until it is on a phone, where a syntax error shows up
+      # as a blank screen with no explanation.
+      - name: WebUI
+        run: node --check module/webroot/app.js

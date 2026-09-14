@@ -11,28 +11,13 @@ until [ "$(getprop sys.boot_completed)" = "1" ]; do
     sleep 2
 done
 
-# The modem fills gsm.sim.operator.numeric and .alpha independently and one slot at a time, so
-# reading too early yields a half-built list — or one carrier's name against another's MCCMNC.
-# Wait until both agree in length and stop changing.
-prev=""
-stable=0
-i=0
-while [ "$i" -lt 60 ]; do
-    numeric=$(getprop gsm.sim.operator.numeric)
-    alpha=$(getprop gsm.sim.operator.alpha)
-    slots_n=$(echo "$numeric" | tr ',' '\n' | grep -c .)
-    slots_a=$(echo "$alpha" | tr ',' '\n' | grep -c .)
-
-    if [ -n "$numeric" ] && [ "$slots_n" = "$slots_a" ] && [ "$numeric|$alpha" = "$prev" ]; then
-        stable=$((stable + 1))
-        [ "$stable" -ge 2 ] && break
-    else
-        stable=0
-    fi
-    prev="$numeric|$alpha"
-    sleep 2
-    i=$((i + 1))
-done
-
 mkdir -p "$DATADIR"
-"$MODDIR/bin/imsforge" detect --save > "$DATADIR/last-detect.json" 2>&1
+# --wait rather than a polling loop here: the modem fills gsm.sim.operator.numeric and .alpha
+# independently and one slot at a time, and what counts as a complete answer — every slot with
+# both a number and a name — is the patcher's rule. Stating it a second time in shell, in other
+# words, is how the two drift apart.
+#
+# The streams are kept apart: progress notes and the list of what was saved go to the log, and
+# the JSON stays parseable.
+"$MODDIR/bin/imsforge" detect --save --wait 120 \
+    > "$DATADIR/last-detect.json" 2> "$DATADIR/last-detect.log"

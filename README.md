@@ -97,6 +97,11 @@ it is just the MCCMNC. The WebUI shows the right one for every inserted SIM, and
 Settings → APNs, which otherwise comes from the name the SIM reports), `ims_apn_value`,
 `ims_apn: false`, `bools`, `int_arrays`, plus top-level `auto: false` and `skip: ["name"]`.
 
+An unknown key is rejected outright rather than ignored, so a typo cannot leave a setting that
+quietly does nothing — but it also means a bad file stops the next boot from patching anything.
+The WebUI therefore runs `imsforge check` over what you typed before it replaces the file that
+works, and you can do the same by hand: `imsforge check --config /data/adb/imsforge/carriers.json`.
+
 The key set written for each carrier mirrors what PixelIMS sets, minus
 `carrier_supports_ss_over_ut_bool` — that one breaks call forwarding when the carrier's XCAP
 server is unreachable.
@@ -132,6 +137,11 @@ what was produced. Run by hand later, `/product` shows imsforge's own output rat
 — reading that would make the "already certified?" check see our own work and skip everything, so
 the fingerprint tells the two apart and the cached stock is used instead. A run that changes
 nothing is treated as "we are reading ourselves" and never refreshes the cache.
+
+Each run also leaves `/data/adb/imsforge/status.json`: what it decided, carrier by carrier, and
+why. That is what the WebUI reads — it never parses the log, so the wording of a log line is not
+an interface. `imsforge status` prints that record along with whether the file the system is
+reading right now is the one imsforge wrote, which is the same fingerprint comparison as above.
 
 Protobuf surgery uses [rust-protobuf](https://github.com/stepancheg/rust-protobuf) specifically
 because it preserves fields that are not in our schema. Google may add fields to CarrierSettings

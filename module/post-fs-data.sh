@@ -9,6 +9,20 @@
 LOG_NAME=last-boot.log
 PHONE_FILES=/data/user_de/0/com.android.phone/files
 
+# The output directory below is removed with rm -rf, as root. Everything that goes into building
+# it therefore has to be something this script can vouch for, starting with its own location:
+# invoked as "sh post-fs-data.sh", $0 carries no directory at all.
+case "$0" in
+    */*) MODDIR=${0%/*} ;;
+    *) MODDIR=. ;;
+esac
+case "$MODDIR" in
+    /*) ;;
+    *) MODDIR=$(cd "$MODDIR" && pwd) || exit 1 ;;
+esac
+DATADIR=/data/adb/imsforge
+mkdir -p "$DATADIR"
+
 # Where the mount backend expects our files, worked out by observation rather than by guessing
 # from which root implementation is installed.
 #
@@ -17,32 +31,38 @@ PHONE_FILES=/data/user_de/0/com.android.phone/files
 # APatch keep the system/ prefix. Whichever spelling the marker ends up in is the one to write to.
 #
 # The marker only survives until the first patch replaces that directory, so the answer is
-# remembered. The root-implementation check stays as a last resort for a module whose state was
-# wiped by hand.
-MODDIR=${0%/*}
-DATADIR=/data/adb/imsforge
-mkdir -p "$DATADIR"
-
-OUT=""
-for d in "$MODDIR/product/etc/CarrierSettings" "$MODDIR/system/product/etc/CarrierSettings"; do
-    if [ -e "$d/.keep" ]; then
-        OUT="$d"
-        echo "$OUT" > "$DATADIR/layout"
+# remembered — as the prefix alone, never as a whole path, so that what comes back out of that
+# file can be checked against the two spellings that exist rather than trusted as given.
+LAYOUT=""
+for prefix in product system/product; do
+    if [ -e "$MODDIR/$prefix/etc/CarrierSettings/.keep" ]; then
+        LAYOUT=$prefix
+        echo "$LAYOUT" > "$DATADIR/layout"
         break
     fi
 done
 
-if [ -z "$OUT" ] && [ -f "$DATADIR/layout" ]; then
-    OUT=$(cat "$DATADIR/layout")
+if [ -z "$LAYOUT" ] && [ -f "$DATADIR/layout" ]; then
+    LAYOUT=$(cat "$DATADIR/layout")
+    # v2.1.x remembered the whole path. Take the prefix back out of it, so an install that
+    # predates this is not thrown back on the guess below.
+    LAYOUT=${LAYOUT#"$MODDIR/"}
+    LAYOUT=${LAYOUT%/etc/CarrierSettings}
 fi
 
-if [ -z "$OUT" ]; then
-    if [ "$KSU" = "true" ] || [ -d /data/adb/ksu ]; then
-        OUT="$MODDIR/product/etc/CarrierSettings"
-    else
-        OUT="$MODDIR/system/product/etc/CarrierSettings"
-    fi
-fi
+case "$LAYOUT" in
+    product | system/product) ;;
+    # No marker and nothing trustworthy remembered: fall back to what the root implementation
+    # implies. This is the last resort for a module whose state was wiped by hand.
+    *)
+        if [ "$KSU" = "true" ] || [ -d /data/adb/ksu ]; then
+            LAYOUT=product
+        else
+            LAYOUT=system/product
+        fi
+        ;;
+esac
+OUT="$MODDIR/$LAYOUT/etc/CarrierSettings"
 
 {
     echo "[$(date)] post-fs-data"
@@ -60,7 +80,7 @@ fi
     mkdir -p "$STAGE"
 
     if "$MODDIR/bin/imsforge" patch --out "$STAGE" --config "$DATADIR/carriers.json" \
-        --cache "$DATADIR/stock"; then
+        --stock-cache "$DATADIR/stock"; then
         # Files created at runtime inherit adb_data_file from /data/adb. Mounted over /product
         # with that label, com.google.android.carrier cannot read them — so relabel to match a
         # stock file.
