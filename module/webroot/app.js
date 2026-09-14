@@ -62,9 +62,11 @@ const state = {
   sims: [],
   patchedLastBoot: [],   // canonical names imsforge actually wrote on this boot
   certified: [],         // carriers the patcher deliberately left to Google
-  booted: false,         // is there a boot log to reason from at all
+  booted: false,         // is there a record of a patch run to reason from at all
+  live: false,           // is the file the system reads right now our output
+  nothingToPatch: false, // the last run decided every carrier was fine as Google shipped it
   ims: {},               // slot index -> { registered }
-  reason: null,          // carrier-side explanation when IMS is down
+  reasons: {},           // slot index -> carrier-side explanation when IMS is down
 };
 
 function showBanner(text, actionLabel, onClick) {
@@ -91,9 +93,20 @@ echo "@@detect"; ${MODDIR}/bin/imsforge detect 2>/dev/null
 echo "@@log"; cat ${MODDIR}/last-boot.log 2>/dev/null
 echo "@@meta"; ls -d /data/adb/metamodule 2>/dev/null || echo missing
 echo "@@impl"; [ -d /data/adb/ksu ] && echo ksu || echo other
-echo "@@md5"; md5sum /product/etc/CarrierSettings/others.pb $(ls ${MODDIR}/product/etc/CarrierSettings/others.pb ${MODDIR}/system/product/etc/CarrierSettings/others.pb 2>/dev/null | head -1) 2>/dev/null | awk '{print $1}'
+echo "@@status"; ${MODDIR}/bin/imsforge status 2>/dev/null
 echo "@@volte"; dumpsys carrier_config 2>/dev/null | grep -E '^[[:space:]]*carrier_volte_available_bool =' | sort -u
-echo "@@ims"; logcat -b radio -d -t 1000 2>/dev/null | grep isImsRegistered | tail -10
+echo "@@ims"; logcat -b radio -d 2>/dev/null | grep isImsRegistered | tail -10
+echo "@@radio"; dumpsys telephony.registry 2>/dev/null | awk '
+  /^[[:space:]]*Phone Id=/ { split($0, a, "="); phone = a[2]; seen[phone] = 0 }
+  /mPreciseDataConnectionStates/ {
+    if ($0 ~ /PcscfAddresses: \[ \//) print "pdn", phone, "yes"; else print "pdn", phone, "no"
+  }
+  /mVopsSupport/ && seen[phone] == 0 {
+    n = split($0, b, "mVopsSupport = ")
+    if (n > 1) { print "vops", phone, substr(b[2], 1, 1); seen[phone] = 1 }
+  }
+  /IWLAN_IKEV2_AUTH_FAILURE/ { print "iwlan", phone }
+'
 `;
 
 function sections(stdout) {
@@ -138,58 +151,87 @@ async function loadAll() {
     state.sims = [];
   }
 
-  // Which carriers did the last boot actually write? Log lines look like
-  // "others.pb [25001]: 20 keys" or "tinkoff_ru.pb: 19 keys".
-  const log = s.log || '';
-  state.patchedLastBoot = [
-    ...[...log.matchAll(/\[([^\]]+)\]:\s*\d+ keys/g)].map((m) => m[1]),
-    ...[...log.matchAll(/^(\S+)\.pb:\s*\d+ keys/gm)].map((m) => m[1]),
-  ];
+  // What the last patch decided, and whether it is what the system reads right now. The patcher
+  // writes this record for us: reconstructing it from the log would make the wording of a log
+  // line an interface, and a reworded line would silently make this screen lie.
+  let status = {};
+  try {
+    status = JSON.parse(s.status || '{}');
+  } catch (e) { /* no patcher, or one too old to answer */ }
+  const run = status.run && status.run.format === 1 ? status.run : null;
+  // "ours" is the only answer that means the mount backend delivered our files.
+  state.live = status.product === 'ours';
+  const carriers = run && Array.isArray(run.carriers) ? run.carriers : [];
+  const named = (outcome) =>
+    carriers.filter((c) => c.outcome === outcome).map((c) => c.canonical_name);
+
+  state.patchedLastBoot = named('patched');
   // Only the patcher knows a carrier was left alone because Google already supports it; the
   // interface must not guess that from the absence of a patch.
-  state.certified = [...log.matchAll(/^\s*(\S+): VoLTE already enabled by Google/gm)].map((m) => m[1]);
-  state.booted = log.length > 0;
-  $('log').textContent = log || 'no log yet — reboot once';
+  state.certified = named('certified');
+  state.booted = run !== null;
+  state.nothingToPatch = run !== null && state.patchedLastBoot.length === 0;
 
-  // isImsRegistered is logged per phone; phone index matches SIM slot order.
-  // The last line per phone wins. Or-ing them would keep reporting "registered" after IMS had
-  // dropped, simply because an older line in the buffer said so.
+  // A name in carriers.json that CarrierSettings has nothing for: valid JSON, accepted on save,
+  // and still nothing will ever come of it. Only the patcher can tell, and only after a boot.
+  const missing = named('missing');
+  const note = $('config-note');
+  note.textContent = missing.length
+    ? `carriers.json names ${missing.join(', ')} — no carrier by that name exists in this phone's `
+      + 'CarrierSettings, so nothing is patched for it.'
+    : '';
+  note.hidden = missing.length === 0;
+
+  $('log').textContent = s.log || 'no log yet — reboot once';
+
+  // Is IMS actually up, per slot?
+  //
+  // The IMS bearer is the thing to look at: an APN of type IMS that is connected and carries the
+  // P-CSCF address the network handed out. That is live state, read out of a dump.
+  //
+  // isImsRegistered in the radio log is only corroboration, and only where the dump said nothing
+  // about a slot at all: the line is a debug print from a getter, so it appears when something
+  // happens to call it — three times in an hour on a working phone — and then ages out of the
+  // ring buffer. Read the other way round, its absence would report a working SIM as broken.
+  //
+  // A slot missing from both is left unknown rather than called unregistered.
   state.ims = {};
-  for (const m of (s.ims || '').matchAll(/Phone-(\d)\s*: isImsRegistered =(\w+)/g)) {
-    state.ims[Number(m[1])] = { registered: m[2] === 'true' };
+  for (const m of (s.radio || '').matchAll(/^pdn (\d+) (yes|no)$/gm)) {
+    state.ims[Number(m[1])] = { registered: m[2] === 'yes' };
   }
-  state.reason = null;
+  const logged = {};
+  // The last line per phone wins: or-ing them would keep reporting "registered" after IMS had
+  // dropped, simply because an older line in the buffer said so.
+  for (const m of (s.ims || '').matchAll(/Phone-(\d)\s*: isImsRegistered =(\w+)/g)) {
+    logged[Number(m[1])] = m[2] === 'true';
+  }
+  for (const slot of Object.keys(logged)) {
+    if (!state.ims[slot]) state.ims[slot] = { registered: logged[slot] };
+  }
+
+  // Two carrier-side states no patch can change. Naming them keeps the module from looking
+  // broken when the carrier simply does not offer the service.
+  //
+  // Per phone, and only the first value each one reports: the dump carries a whole history of
+  // service states, so a carrier whose VoLTE works right now still has older entries saying it
+  // did not. Reading them all at once and asking "is a 3 in there" blames the wrong SIM, and
+  // blames it for something that is no longer true.
+  state.reasons = {};
+  for (const m of (s.radio || '').matchAll(/^vops (\d+) (\d)$/gm)) {
+    if (m[2] === '3') {
+      state.reasons[Number(m[1])] = 'the network does not offer VoLTE to this SIM';
+    }
+  }
+  for (const m of (s.radio || '').matchAll(/^iwlan (\d+)$/gm)) {
+    const slot = Number(m[1]);
+    if (!state.reasons[slot]) {
+      state.reasons[slot] = 'the carrier rejected Wi-Fi calling authentication';
+    }
+  }
 
   renderSims();
   renderStatus(s);
   syncRaw();
-
-  // The carrier-side reason costs a 200 KB dump of telephony.registry, so it is only worth
-  // fetching when something is actually wrong.
-  if (needsReason()) loadReason();
-}
-
-function needsReason() {
-  return state.sims.some((sim, slot) => {
-    const plan = carrierPlan(sim.canonical_name);
-    return plan.on && !(state.ims[slot] && state.ims[slot].registered);
-  });
-}
-
-async function loadReason() {
-  const res = await exec(
-    "dumpsys telephony.registry 2>/dev/null | " +
-      "grep -oE 'mVopsSupport = [0-9]|IWLAN_IKEV2_AUTH_FAILURE' | sort -u"
-  );
-  // Two carrier-side states no patch can change. Naming them keeps the module from looking
-  // broken when the carrier simply does not offer the service.
-  const vops = [...res.stdout.matchAll(/mVopsSupport = (\d)/g)].map((m) => m[1]);
-  if (vops.includes('3')) {
-    state.reason = 'the network does not offer VoLTE to this SIM';
-  } else if (/IWLAN_IKEV2_AUTH_FAILURE/.test(res.stdout)) {
-    state.reason = 'the carrier rejected Wi-Fi calling authentication';
-  }
-  if (state.reason) renderSims();
 }
 
 /* ----------------------------------------------------------------- render */
@@ -263,12 +305,20 @@ function renderSims() {
     if (ims && ims.registered) {
       line.classList.add('good');
       line.textContent = 'VoLTE is working — IMS registered';
+    } else if (!ims) {
+      // Nothing to go on. Calling that "not registered" would be a guess, and on a phone that
+      // has been up a while it would be the wrong one.
+      if (plan.on) {
+        line.classList.add('muted');
+        line.textContent = 'IMS state unknown';
+      }
     } else if (plan.on) {
       line.classList.add('warn');
-      line.textContent = state.reason
-        ? `IMS not registered — ${state.reason}. That is a carrier-side setting; no patch can change it.`
+      const why = state.reasons[slot];
+      line.textContent = why
+        ? `IMS not registered — ${why}. That is a carrier-side setting; no patch can change it.`
         : 'IMS not registered yet';
-    } else if (ims) {
+    } else {
       line.classList.add('muted');
       line.textContent = 'IMS not registered';
     }
@@ -289,16 +339,19 @@ function renderStatus(s) {
   addRow(rows, 'Mount backend',
     hasMeta ? pill('ok', 'present') : (isKsu ? pill('bad', 'missing') : pill('idle', 'built in')));
 
-  const hashes = (s.md5 || '').trim().split(/\s+/);
-  const applied = hashes.length === 2 && hashes[0] === hashes[1];
-  addRow(rows, 'Patch active on this boot', applied ? pill('ok', 'yes') : pill('bad', 'no'));
+  // The patcher answers this itself: it left behind the fingerprint of what it wrote, so it can
+  // tell our output from Google's original in whatever /product shows now.
+  addRow(rows, 'Patch active on this boot',
+    state.live ? pill('ok', 'yes')
+      : state.nothingToPatch ? pill('idle', 'nothing to patch')
+        : pill('bad', 'no'));
 
   const volte = /carrier_volte_available_bool = true/.test(s.volte || '');
   addRow(rows, 'Telephony sees VoLTE enabled', volte ? pill('ok', 'yes') : pill('bad', 'no'));
 
   if (!hasMeta && isKsu) {
     showBanner('No mount backend installed — nothing this module writes can reach the system.', '', null);
-  } else if (!applied) {
+  } else if (!state.live && !state.nothingToPatch) {
     showBanner('The patch is not active. Reboot to apply it.', 'Reboot', reboot);
   }
 }
@@ -343,14 +396,23 @@ async function save() {
     }
   }
 
+  // Written to one side and checked by the patcher before it replaces anything: the patcher
+  // rejects a key it does not know, and a configuration it rejects stops the next boot from
+  // patching at all. Finding that out here beats finding it out from a log after a reboot.
+  //
   // base64 keeps quotes, newlines and non-ASCII intact through the shell.
   const text = JSON.stringify(state.config, null, 2) + '\n';
   const b64 = btoa(unescape(encodeURIComponent(text)));
-  const res = await exec(
-    `mkdir -p ${DATADIR} && echo '${b64}' | base64 -d > ${CONFIG} && chmod 644 ${CONFIG} && echo saved`
-  );
+  const res = await exec(`
+mkdir -p ${DATADIR} || exit 1
+echo '${b64}' | base64 -d > ${CONFIG}.new || exit 1
+${MODDIR}/bin/imsforge check --config ${CONFIG}.new || { rm -f ${CONFIG}.new; exit 1; }
+chmod 644 ${CONFIG}.new && mv ${CONFIG}.new ${CONFIG} && echo saved
+`);
   if (res.errno !== 0 || !res.stdout.includes('saved')) {
-    toast('Could not write the configuration');
+    const why = (res.stderr || '').replace(/^imsforge: \S*:\s*/m, '').trim();
+    $('raw-error').textContent = why;
+    toast(why ? 'Rejected: ' + why.split('\n')[0] : 'Could not write the configuration');
     return;
   }
   toast('Saved');
