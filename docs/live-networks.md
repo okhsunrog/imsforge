@@ -25,8 +25,29 @@ the recovery record. LTE_CA and LTE representations are compared semantically.
   saved in `/data/adb/imsforge/backup-network-20261001`.
 - Pressed MTS's LTE only button in the actual KsuWebUI app; readback and the UI
   both showed LTE only, restoration became available, and rmnet16 passed 3/3 pings.
-- Final MTS selection: LTE only, with its initial 64511 recovery record retained.
+- End of the pre-reboot test: LTE only, with its initial 64511 recovery record retained.
 - Shared checks passed: 60 Rust unit tests, one Rust integration test, 21
   JavaScript/shell tests, formatting, Clippy, ShellCheck, and JavaScript syntax.
 - Incoming-call verification is intentionally deferred to the user. Actual 5G
-  connectivity, reboot retention, and other phone/Android versions were not tested.
+  connectivity and other phone/Android versions were not tested.
+
+## Normal 2.4.0 update and reboot
+
+- Version bumped to 2.4.0, versionCode 10; checks and arm64 ZIP build passed.
+- Installed using `ksud module install`, with the user's physical volume-down
+  confirmation. The installer staged the module in `modules_update` successfully.
+- Reboot completed; installed metadata and binary both reported 2.4.0. All thirteen
+  runtime files matched the ZIP (the installer removes customize.sh by design).
+- The current boot report was applied, mounted output matched, and configuration
+  was unchanged. The actual KsuWebUI screen showed 2.4.0 and Patch applied.
+- Android retained the MTS LTE-only USER mask 266240 and its original recovery
+  record. However, MTS did not register on cellular LTE after reboot: CS and PS
+  WWAN registrations were NOT_REG_OR_SEARCHING with rejectCause 0, mobile data
+  was enabled but no cellular connection was established.
+- Restoring the original mask 64511 immediately recovered MTS registration on
+  EDGE and mobile IP connectivity. A subsequent LTE-only attempt again produced
+  OUT_OF_SERVICE. Restored the original mask again; rmnet16 passed 3/3 pings.
+- Final device state: original MTS network selection restored, VoLTE/VoWiFi
+  untouched, second SIM untouched. The cause of failed LTE registration remains
+  unresolved; the successful pre-reboot tests do not establish a reliable
+  data-only setup after reboot.
