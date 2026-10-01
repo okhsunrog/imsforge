@@ -35,6 +35,9 @@ struct Sim {
     mcc: String,
     mnc: String,
     mask: u64,
+    // Older recovery records predate usage changes; migrate them before changing usage.
+    #[serde(default)]
+    usage_setting: Option<u8>,
 }
 
 fn field<'a>(line: &'a str, key: &str) -> Result<&'a str, String> {
@@ -83,6 +86,12 @@ fn inventory(text: &str) -> Result<Vec<Sim>, String> {
             mcc: field(line, "mcc=")?.into(),
             mnc: field(line, "mnc=")?.into(),
             mask,
+            usage_setting: Some(match field(line, "usageSetting=")? {
+                "DEFAULT" => 0,
+                "VOICE_CENTRIC" => 1,
+                "DATA_CENTRIC" => 2,
+                _ => return Err("Subscription usage setting unavailable".into()),
+            }),
         };
         if let Some(previous) = sims.insert(sim.slot, sim.clone())
             && previous != sim
@@ -119,6 +128,34 @@ fn command(program: &str, args: &[&str]) -> Result<String, String> {
 
 fn read_sims() -> Result<Vec<Sim>, String> {
     inventory(&command("dumpsys", &["isub"])?)
+}
+
+fn set_usage(sub_id: u32, usage: u8) -> Result<(), String> {
+    let helper = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .with_file_name("usage-setting.dex");
+    if !helper.is_file() {
+        return Err("Usage-setting helper missing; install the complete module ZIP".into());
+    }
+    let output = Command::new("timeout")
+        .arg("12")
+        .arg("app_process")
+        .env("CLASSPATH", helper)
+        .args([
+            "/system/bin",
+            "UsageSetting",
+            &sub_id.to_string(),
+            &usage.to_string(),
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "Usage setting failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 fn same_sim(a: &Sim, b: &Sim) -> bool {
     a.sub_id == b.sub_id && a.mcc == b.mcc && a.mnc == b.mnc
@@ -164,8 +201,11 @@ pub fn run(args: &Args) -> Result<(), String> {
         let mut rows = Vec::new();
         for sim in sims {
             let backup = saved(&args.state_dir.join(format!("{}.json", sim.sub_id)))?;
-            rows.push(serde_json::json!({"slot":sim.slot,"sub_id":sim.sub_id,"mask":sim.mask,
-                "mode":mode(sim.mask),"can_restore":backup.as_ref().is_some_and(|b| same_sim(&sim,b))}));
+            rows.push(
+                serde_json::json!({"slot":sim.slot,"sub_id":sim.sub_id,"mask":sim.mask,
+                "mode":mode(sim.mask),"usage_setting":sim.usage_setting,
+                "can_restore":backup.as_ref().is_some_and(|b| same_sim(&sim,b))}),
+            );
         }
         println!("{}", serde_json::json!({"sims":rows}));
         return Ok(());
@@ -177,9 +217,30 @@ pub fn run(args: &Args) -> Result<(), String> {
         .find(|s| s.slot == slot && s.sub_id == sub_id)
         .ok_or("SIM changed or is unavailable; refresh before changing networks")?;
     let path = args.state_dir.join(format!("{sub_id}.json"));
-    let backup = saved(&path)?;
+    let mut backup = saved(&path)?;
     if backup.as_ref().is_some_and(|b| !same_sim(sim, b)) {
         return Err("Saved recovery belongs to a different SIM".into());
+    }
+    if let Some(original) = backup.as_mut()
+        && original.usage_setting.is_none()
+    {
+        original.usage_setting = sim.usage_setting;
+        atomic::write(
+            &path,
+            serde_json::to_vec(original).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    let usage = if matches!(args.action, Action::Restore) {
+        backup
+            .as_ref()
+            .and_then(|s| s.usage_setting)
+            .ok_or("Original usage setting unavailable")?
+    } else {
+        2
+    };
+    if usage > 2 {
+        return Err("Invalid saved usage setting".into());
     }
     let mask = match args.action {
         Action::Lte => LTE,
@@ -201,6 +262,13 @@ pub fn run(args: &Args) -> Result<(), String> {
     if !current.iter().any(|s| s.slot == slot && same_sim(s, sim)) {
         return Err("SIM changed before applying; refresh and retry".into());
     }
+    if sim.usage_setting != Some(usage) {
+        set_usage(sub_id, usage)?;
+    }
+    let current = read_sims()?;
+    if !current.iter().any(|s| s.slot == slot && same_sim(s, sim)) {
+        return Err("SIM changed while setting data priority; recovery retained".into());
+    }
     command(
         "cmd",
         &[
@@ -216,9 +284,9 @@ pub fn run(args: &Args) -> Result<(), String> {
         .iter()
         .find(|s| s.slot == slot && same_sim(s, sim))
         .ok_or("SIM unavailable after change; recovery retained")?;
-    if !equivalent(actual.mask, mask) {
+    if !equivalent(actual.mask, mask) || actual.usage_setting != Some(usage) {
         return Err(format!(
-            "Network mode not confirmed (USER mask {}); recovery retained",
+            "Network mode or usage not confirmed (USER mask {}); recovery retained",
             actual.mask
         ));
     }
@@ -227,7 +295,7 @@ pub fn run(args: &Args) -> Result<(), String> {
     }
     println!(
         "{}",
-        serde_json::json!({"slot":slot,"sub_id":sub_id,"mask":actual.mask,"mode":mode(actual.mask)})
+        serde_json::json!({"slot":slot,"sub_id":sub_id,"mask":actual.mask,"mode":mode(actual.mask),"usage_setting":actual.usage_setting})
     );
     Ok(())
 }
@@ -235,7 +303,7 @@ pub fn run(args: &Args) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const LINE: &str = "Active subscriptions:\n[SubscriptionInfoInternal: id=1 simSlotIndex=1 mcc=250 mnc=01 allowedNetworkTypesForReasons=user=64511,power=654335]";
+    const LINE: &str = "Active subscriptions:\n[SubscriptionInfoInternal: id=1 simSlotIndex=1 mcc=250 mnc=01 usageSetting=DEFAULT allowedNetworkTypesForReasons=user=64511,power=654335]";
     #[test]
     fn exact_user_mask_not_carrier_or_history() {
         let text = format!(
@@ -245,6 +313,7 @@ mod tests {
         let sims = inventory(&text).unwrap();
         assert_eq!(sims.len(), 1);
         assert_eq!(sims[0].mask, 64511);
+        assert_eq!(sims[0].usage_setting, Some(0));
         assert_eq!(sims[0].slot, 1);
         assert!(inventory(&LINE.replace("user=", "carrier=")).is_err());
     }
@@ -268,5 +337,21 @@ mod tests {
         fs::write(&path, "{").unwrap();
         assert!(saved(&path).is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn usage_priority_is_saved_exactly_and_legacy_records_remain_readable() {
+        for (name, value) in [("DEFAULT", 0), ("VOICE_CENTRIC", 1), ("DATA_CENTRIC", 2)] {
+            let sim = inventory(&LINE.replace("DEFAULT", name)).unwrap().remove(0);
+            let saved: Sim = serde_json::from_str(&serde_json::to_string(&sim).unwrap()).unwrap();
+            assert_eq!(saved.usage_setting, Some(value));
+        }
+        let mut json = serde_json::to_value(inventory(LINE).unwrap().remove(0)).unwrap();
+        json.as_object_mut().unwrap().remove("usage_setting");
+        assert_eq!(
+            serde_json::from_value::<Sim>(json).unwrap().usage_setting,
+            None
+        );
+        assert!(inventory(&LINE.replace("DEFAULT", "UNKNOWN")).is_err());
     }
 }

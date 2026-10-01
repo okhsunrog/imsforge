@@ -64,10 +64,13 @@ render it for any of them:
 - configuration editing, validation, saving and discarding a draft.
 
 Each SIM also has live **LTE only**, **LTE + NR**, and **Restore previous** actions.
-These change the USER allowed-network mask immediately, without a reboot or changes
-to VoLTE / Wi-Fi calling settings. The original mask is saved per subscription in
+These change the USER allowed-network mask and select data-centric usage immediately,
+without a reboot or changes to VoLTE / Wi-Fi calling settings. Data priority prevents
+the modem from preferring voice availability over LTE when VoLTE is disabled. The
+original mask and usage priority are saved per subscription in
 `/data/adb/imsforge/network` before the first change; selecting another mode keeps
-that recovery point. Restoration follows the subscription even if its slot changes.
+that recovery point. Restoration returns both values and follows the subscription
+even if its slot changes.
 The controls show the allowed selection, not proof of current LTE/5G connectivity.
 Carrier and power restrictions can further limit the networks available.
 
@@ -178,7 +181,8 @@ them for every other carrier in the file.
 
 ## Building
 
-Needs the Android NDK, `cargo-ndk` and the `aarch64-linux-android` target:
+Needs the Android NDK, Android SDK build-tools (`d8`), a JDK, `cargo-ndk`
+and the `aarch64-linux-android` target:
 
 ```bash
 rustup target add aarch64-linux-android

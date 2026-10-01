@@ -254,8 +254,8 @@ function renderSims() {
         actions.append(button);
       }
       live.append(actions);
-      live.append(el('p', 'hint', 'Applies immediately; connectivity may briefly drop. VoLTE and Wi-Fi calling settings are unchanged. LTE only does not block VoLTE calls.'));
-      if (network.can_restore) live.append(el('p', 'hint', 'The original network selection is saved for this SIM. Restore previous returns it.'));
+      live.append(el('p', 'hint', 'Applies immediately with data priority. VoLTE and Wi-Fi calling settings are unchanged.'));
+      if (network.can_restore) live.append(el('p', 'hint', 'Restore previous returns the original networks and voice/data priority for this SIM.'));
     } else live.append(el('p', 'hint', 'Live network controls unavailable. Refresh to check device support.'));
     card.append(live);
     const observed = state.ready ? state.observations[sim.slot] || {} : {};

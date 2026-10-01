@@ -1,14 +1,17 @@
 # Live network selection
 
 Per-SIM WebUI actions call `imsforge network lte|lte-nr|restore --slot N --sub-id ID`.
-`network status` reports the USER mask and recovery availability. It reads only
+`network status` reports the USER mask, usage priority and recovery availability. It reads only
 active subscriptions from `dumpsys isub`; unsupported formats fail without writing
 radio preferences. No carrier patch, APN, IMS setting or boot service is changed.
 
-The first change saves the exact USER mask under `/data/adb/imsforge/network/ID.json`
+The first change saves the exact USER mask and subscription usage setting under `/data/adb/imsforge/network/ID.json`
 with the existing atomic writer and lock. Later selections retain that recovery
-point. Actions recheck subscription identity before applying and read back the
-mask afterward. A failed action retains recovery. Successful restoration removes
+point. LTE / LTE+NR select DATA_CENTRIC before changing the mask; restoration returns
+the original usage setting as well. A small bundled DEX helper invokes the named
+ISub.setUsageSetting framework API as root, avoiding hard-coded Binder transaction
+numbers. Actions recheck subscription identity before applying and read back the
+mask and usage afterward. A failed action retains recovery. Successful restoration removes
 the recovery record. LTE_CA and LTE representations are compared semantically.
 
 ## Pixel 8 Pro verification, 2026-10-01
@@ -51,3 +54,29 @@ the recovery record. LTE_CA and LTE representations are compared semantically.
   untouched, second SIM untouched. The cause of failed LTE registration remains
   unresolved; the successful pre-reboot tests do not establish a reliable
   data-only setup after reboot.
+
+## 2.4.1 data-priority fix
+
+- Disabling the second SIM and Wi-Fi did not by itself resolve the failure: MTS
+  registered on LTE with the original mask but lost service after LTE-only was
+  selected. A bound rmnet16 ping then lost 4/4 packets.
+- Original subscription usage was DEFAULT, resolved by Android to VOICE_CENTRIC.
+  Pixel framework resources support both VOICE_CENTRIC and DATA_CENTRIC.
+- Setting MTS to DATA_CENTRIC and selecting LTE-only recovered cellular LTE.
+  Multiple bound ping checks passed, and LTE remained available for several minutes.
+- The updated CLI saved the original mask 64511 and usage setting DEFAULT (0),
+  applied mask 266240 with DATA_CENTRIC (2), restored both 64511/0, and reapplied
+  266240/2 successfully. VoLTE and Wi-Fi calling remained off.
+- Shared checks passed: 61 Rust unit tests, one integration test, 21 JavaScript/shell
+  tests, Java helper compilation, formatting, Clippy and ShellCheck.
+- Installed the complete 2.4.1 ZIP through ksud with physical confirmation and
+  rebooted. All fourteen runtime files matched the ZIP; installed metadata and
+  binary reported 2.4.1. The current boot report was applied and matched mounted output.
+- After boot, MTS retained mask 266240 and DATA_CENTRIC (2), registered LTE on
+  WWAN, and established mobile data. Bound rmnet16 checks passed 4/4 packets
+  twice, including after Wi-Fi was disabled again. The second SIM remained disabled.
+- The real KsuWebUI showed 2.4.1, Patch applied, LTE only and IMS not registered.
+  Detection reported incomplete while the other SIM was disabled; this did not
+  prevent the active MTS subscription or live network controls from being read.
+- Final state: MTS LTE only with data priority; original 64511/DEFAULT recovery
+  retained. Incoming-call behavior remains untested and will be checked by the user.

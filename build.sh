@@ -16,6 +16,9 @@ TARGET=${TARGET:-$EXPECTED_TARGET}
 [ "$TARGET" = "$EXPECTED_TARGET" ] || { echo "ABI/TARGET mismatch" >&2; exit 1; }
 DIST=dist
 STAGE=$DIST/module
+SDK_ROOT=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-${ANDROID_NDK_HOME:-${NDK_HOME:-}}/../..}}
+D8=${D8:-$(find "$SDK_ROOT/build-tools" -mindepth 2 -maxdepth 2 -name d8 2>/dev/null | sort -V | tail -1)}
+[ -x "$D8" ] || { echo "Android SDK d8 is required for the usage-setting helper" >&2; exit 1; }
 
 # The zip announces its version from module.prop and the binary reports its own from Cargo.toml.
 # Nothing keeps the two in step, so a release can otherwise ship a module that calls itself one
@@ -43,6 +46,10 @@ echo "==> assembling $STAGE"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin"
 install -m 755 "native/target/$TARGET/release/imsforge" "$STAGE/bin/imsforge"
+mkdir -p "$DIST/java"
+javac --release 8 -Xlint:-options -d "$DIST/java" native/java/UsageSetting.java
+"$D8" --min-api 33 --output "$DIST/java" "$DIST/java/UsageSetting.class"
+install -m 644 "$DIST/java/classes.dex" "$STAGE/bin/usage-setting.dex"
 install -m 755 module/post-fs-data.sh module/service.sh module/action.sh \
     module/customize.sh module/uninstall.sh module/probe.sh "$STAGE/"
 install -m 644 module/*.awk "$STAGE/"
