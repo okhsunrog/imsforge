@@ -63,6 +63,7 @@ const state = {
   config: { auto: true, carriers: [], skip: [] },
   saved: null, sims: [], status: {}, observations: {}, meta: 'unknown',
   expanded: new Set(), ready: false, dirty: false, busy: false, loadId: 0, errors: [],
+  network: [],
 };
 
 // Preserve unknown keys so the Rust validator can reject them instead of silently dropping them.
@@ -143,6 +144,14 @@ async function loadAll(discard = false) {
     state.status = status;
     state.dirty = false;
     state.errors = [];
+    state.network = [];
+    if (data.network_ok !== undefined) {
+      try {
+        const network = JSON.parse(source(data, 'network'));
+        if (!Array.isArray(network.sims) || network.sims.some(s => !Number.isInteger(s.slot) || s.slot < 0 || !Number.isInteger(s.sub_id) || s.sub_id < 0 || !Number.isSafeInteger(s.mask) || s.mask < 0 || !['lte', 'lte-nr', 'custom'].includes(s.mode) || typeof s.can_restore !== 'boolean')) throw new Error('Invalid network status.');
+        state.network = network.sims;
+      } catch (e) { state.errors.push(e.message); }
+    }
     state.meta = 'unknown';
     try { state.meta = source(data, 'meta'); } catch (e) { state.errors.push(e.message); }
     state.observations = {};
@@ -231,6 +240,24 @@ function renderSims() {
     button.append(el('span', 'knob'));
     control.append(label, button);
     card.append(head, control, el('div', `sim-state ${plan.tone}`, plan.what));
+    const network = state.network.find(s => s.slot === sim.slot);
+    const live = el('div', 'live-network');
+    live.append(el('h3', '', 'Radio networks'));
+    if (network) {
+      const names = {lte: 'LTE only', 'lte-nr': 'LTE + NR', custom: 'Custom / system selection'};
+      live.append(el('p', 'hint', `Allowed networks: ${names[network.mode]}`));
+      const actions = el('div', 'row-actions network-actions');
+      for (const [action, label] of [['lte', 'LTE only'], ['lte-nr', 'LTE + NR'], ['restore', 'Restore previous']]) {
+        const button = el('button', 'small', label);
+        button.disabled = !state.ready || state.busy || state.dirty || (action === 'restore' && !network.can_restore);
+        button.onclick = () => changeNetwork(network.slot, network.sub_id, action);
+        actions.append(button);
+      }
+      live.append(actions);
+      live.append(el('p', 'hint', 'Applies immediately; connectivity may briefly drop. VoLTE and Wi-Fi calling settings are unchanged. LTE only does not block VoLTE calls.'));
+      if (network.can_restore) live.append(el('p', 'hint', 'The original network selection is saved for this SIM. Restore previous returns it.'));
+    } else live.append(el('p', 'hint', 'Live network controls unavailable. Refresh to check device support.'));
+    card.append(live);
     const observed = state.ready ? state.observations[sim.slot] || {} : {};
     const ims = imsSummary(observed);
     // A deliberately excluded SIM should not look like a module failure.
@@ -253,6 +280,25 @@ function renderSims() {
     box.append(card);
   }
   if (focused?.startsWith('patch-slot-')) document.getElementById(focused)?.focus();
+}
+
+async function changeNetwork(slot, subId, action) {
+  if (!state.ready || state.busy || state.dirty) return;
+  if (!Number.isInteger(slot) || slot < 0 || !Number.isInteger(subId) || subId < 0 || !['lte', 'lte-nr', 'restore'].includes(action)) return;
+  if (!state.network.some(s => s.slot === slot && s.sub_id === subId)) return;
+  state.busy = true;
+  controls(); renderSims();
+  let error;
+  try {
+    const result = await exec(`${MODDIR}/bin/imsforge network ${action} --slot ${slot} --sub-id ${subId}`);
+    if (result.errno !== 0) throw new Error(result.stderr || result.stdout || 'Network change failed.');
+    const applied = JSON.parse(result.stdout);
+    if (applied.slot !== slot || applied.sub_id !== subId) throw new Error('SIM identity was not confirmed.');
+    toast(action === 'restore' ? 'Previous network selection restored.' : 'Network selection applied.');
+  } catch (e) { error = e.message; }
+  finally { state.busy = false; }
+  await loadAll();
+  if (error) showBanner(`Network change: ${error} Refresh and use Restore previous if needed.`);
 }
 
 function setHealth(tone, title, note) {

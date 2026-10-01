@@ -63,6 +63,21 @@ render it for any of them:
 - current per-slot IMS registration and voice capability, with connection details on demand;
 - configuration editing, validation, saving and discarding a draft.
 
+Each SIM also has live **LTE only**, **LTE + NR**, and **Restore previous** actions.
+These change the USER allowed-network mask immediately, without a reboot or changes
+to VoLTE / Wi-Fi calling settings. The original mask is saved per subscription in
+`/data/adb/imsforge/network` before the first change; selecting another mode keeps
+that recovery point. Restoration follows the subscription even if its slot changes.
+The controls show the allowed selection, not proof of current LTE/5G connectivity.
+Carrier and power restrictions can further limit the networks available.
+
+LTE only does not block VoLTE or Wi-Fi calls. For the intended LTE data-only setup,
+disable VoLTE and Wi-Fi calling yourself in that SIM's Android settings, then verify
+mobile data and incoming calls on your carrier. Connectivity may briefly drop while
+changing networks. Android may retain the selection across reboot; imsforge does not
+reapply it at boot. Restore previous before uninstalling if you want the original
+selection back; removing the module does not reset Android's network preference.
+
 A bottom action bar appears only for unsaved changes or a pending restart. Turning off a
 carrier preserves its custom overrides for the next enable. Confirmed results are green;
 an intentionally excluded SIM is neutral.

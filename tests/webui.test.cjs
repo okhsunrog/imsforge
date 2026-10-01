@@ -7,6 +7,22 @@ const { spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 const code = fs.readFileSync(path.join(root, 'module/webroot/app.js'), 'utf8').replace(/loadAll\(\);\s*$/, '');
 
+test('live network actions bind the refreshed subscription and reject stale identities', async () => {
+  const env = await loaded({network: JSON.stringify({sims:[{slot:1,sub_id:1,mask:64511,mode:'custom',can_restore:false}]})});
+  const calls = [];
+  env.context.exec = async command => {
+    calls.push(command);
+    if (command.includes(' network lte ')) return {errno:0,stdout:JSON.stringify({slot:1,sub_id:1,mask:4096,mode:'lte'})};
+    return {errno:0,stdout:response({network:JSON.stringify({sims:[{slot:1,sub_id:1,mask:4096,mode:'lte',can_restore:true}]})})};
+  };
+  await env.run("changeNetwork(1,2,'lte')");
+  assert.equal(calls.length, 0);
+  await env.run("changeNetwork(1,1,'lte')");
+  assert.match(calls[0], /network lte --slot 1 --sub-id 1$/);
+  assert.equal(env.run('state.network[0].can_restore'), true);
+  assert.equal(env.run('state.dirty'), false);
+});
+
 function setup() {
   const nodes = new Map();
   const ids = new Set([...fs.readFileSync(path.join(root, 'module/webroot/index.html'), 'utf8').matchAll(/id="([^"]+)"/g)].map(match => match[1]));

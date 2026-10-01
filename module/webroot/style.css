@@ -80,3 +80,7 @@ footer p { color: var(--muted); font-size: 12px; text-align: center; margin: 0 0
 .toast { position: fixed; left: 50%; bottom: calc(145px + env(safe-area-inset-bottom)); transform: translateX(-50%); padding: 11px 18px; width: max-content; max-width: calc(100% - 32px); border-radius: 14px; background: var(--fg); color: var(--bg); z-index: 10; font-size: 13px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (max-width: 360px) { main { padding-left: 14px; padding-right: 14px; } header { padding-left: 14px; padding-right: 14px; } .sim { padding: 14px; } }
+/* Live radio actions are independent of the saved boot patch. */
+.live-network { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.live-network h3 { margin: 0 0 8px; font-size: 15px; }
+.network-actions { flex-wrap: wrap; gap: 8px; }

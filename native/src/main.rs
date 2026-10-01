@@ -8,6 +8,7 @@ mod atomic;
 mod cache;
 mod config;
 mod detect;
+mod network;
 mod patch;
 mod plan;
 mod publish;
@@ -80,6 +81,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Change allowed radio networks immediately, without touching IMS settings
+    Network(network::Args),
     /// Patch the CarrierSettings protobufs into a directory
     Patch(PatchArgs),
     /// Generate, label and atomically install module files during post-fs-data
@@ -427,6 +430,7 @@ fn main() -> ExitCode {
         Command::ReadConfig(args) => read_config(args),
         Command::SaveConfig(args) => save_config(args),
         Command::Status(args) => cmd_status(args),
+        Command::Network(args) => network::run(args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

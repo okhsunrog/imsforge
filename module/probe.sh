@@ -49,3 +49,4 @@ capture log cat "$MODDIR/last-boot.log"
 capture radio radio
 capture carrier carrier
 capture ims ims
+capture network "$MODDIR/bin/imsforge" network status
